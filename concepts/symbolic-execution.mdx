@@ -47,13 +47,13 @@ Each iteration explores a new path by flipping one branch condition relative to 
 Understanding where concolic execution fits in the broader testing landscape helps you decide when to reach for Leaf.
 
 <CardGroup cols={3}>
-  <Card title="Pure Symbolic Execution" icon="sigma">
+  <Card title="Pure Symbolic Execution" icon="sigma" href="/concepts/symbolic-execution#how-leaf-compares-to-similar-approaches">
     Reasons about all possible inputs simultaneously, building a tree of path conditions. Powerful for exhaustive coverage of small programs but does not scale well to real-world code with loops, large state, or external calls.
   </Card>
-  <Card title="Concolic Execution (Leaf)" icon="code-branch">
+  <Card title="Concolic Execution (Leaf)" icon="code-branch" href="/concepts/symbolic-execution">
     Runs concretely on one input at a time, tracking symbolic constraints on the side. Scales to real Rust programs, handles external calls naturally, and produces concrete diverging inputs ready to re-run. Closest comparable tool: SymCC.
   </Card>
-  <Card title="Coverage-Guided Fuzzing" icon="shuffle">
+  <Card title="Coverage-Guided Fuzzing" icon="shuffle" href="/guides/hybrid-fuzzing">
     Mutates inputs randomly and uses coverage feedback to guide exploration. Excellent at finding shallow bugs quickly but struggles with complex structured conditions (e.g., magic-byte checks) that require solver assistance.
   </Card>
 </CardGroup>

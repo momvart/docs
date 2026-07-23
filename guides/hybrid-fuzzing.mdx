@@ -159,20 +159,32 @@ cargo fuzz run fuzz_target_1 -- -conc_program=./target/leaf/debug/fuzz_target_1
 
 ## Troubleshooting
 
-<CardGroup cols={2}>
-  <Card title="libleafrt.so not found" icon="triangle-exclamation">
-    Ensure `LD_LIBRARY_PATH` includes the directory containing `libleafrt.so`. Re-run the symlink and export commands from the setup step.
-  </Card>
-  <Card title="Linker errors building with leafc" icon="link-slash">
-    Make sure a working C toolchain and linker are available. `leafc` relies on the system linker for the final binary link step.
-  </Card>
-  <Card title="no_main conflict" icon="circle-xmark">
-    Confirm your `#![no_main]` is replaced with `#![cfg_attr(not(leafc), no_main)]`. A plain `#![no_main]` will suppress the `main` function needed by the concolic stage.
-  </Card>
-  <Card title="Solver timeouts" icon="clock">
-    The default Z3 timeout is 10 seconds per query. Adjust it in `leaf_config.toml` under `[solver.global_params]` if your program has complex constraints.
-  </Card>
-</CardGroup>
+<AccordionGroup>
+  <Accordion title="libleafrt.so not found" icon="triangle-exclamation">
+    Ensure `LD_LIBRARY_PATH` includes the directory containing `libleafrt.so`. Re-run the symlink and export commands from the setup step in the Leaf repository root:
+
+    ```console
+    $ mkdir -p target/debug/runtime_symex
+    $ ln -sf "$(find target/debug -maxdepth 1 -name 'libleafrt*.so' | head -n 1)" \
+        target/debug/runtime_symex/libleafrt.so
+    $ export LD_LIBRARY_PATH="$PWD/target/debug/runtime_symex:$LD_LIBRARY_PATH"
+    ```
+  </Accordion>
+  <Accordion title="Linker errors building with leafc" icon="link-slash">
+    Make sure a working C toolchain and linker are available. `leafc` relies on the system linker for the final binary link step. On Debian-based systems, install `build-essential`; on Fedora/RHEL, install `gcc`.
+  </Accordion>
+  <Accordion title="no_main conflict" icon="circle-xmark">
+    Confirm your `#![no_main]` is replaced with `#![cfg_attr(not(leafc), no_main)]`. A plain `#![no_main]` will suppress the `main` function needed by the concolic stage. A missing `#![no_main]` guard on the non-`leafc` build will conflict with the libFuzzer entry point.
+  </Accordion>
+  <Accordion title="Solver timeouts" icon="clock">
+    The default Z3 timeout is 10 seconds per query. If the solver consistently times out without finding diverging inputs, increase the timeout in `leaf_config.toml` under `[solver.global_params]`:
+
+    ```toml
+    [solver.global_params]
+    timeout = 30000
+    ```
+  </Accordion>
+</AccordionGroup>
 
 <CardGroup cols={2}>
   <Card title="Diverging Inputs" icon="code-branch" href="/guides/diverging-inputs">

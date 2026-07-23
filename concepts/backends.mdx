@@ -11,13 +11,13 @@ This pluggable design means you can change your analysis strategy without recomp
 ## Available Backends
 
 <CardGroup cols={3}>
-  <Card title="runtime_symex" icon="brain">
+  <Card title="runtime_symex" icon="brain" href="/concepts/backends#building-a-backend">
     **Full symbolic execution.** Tracks symbolic constraints on marked variables, queries the Z3 SMT solver to generate diverging inputs, and writes results to `leaf_out/`. This is the primary backend for path exploration, reachability analysis, and hybrid fuzzing seed generation.
   </Card>
-  <Card title="runtime_cf_tracer" icon="route">
+  <Card title="runtime_cf_tracer" icon="route" href="/concepts/backends#building-a-backend">
     **Control-flow tracer.** Records the sequence of branches and basic blocks visited during execution without invoking a solver. Produces JSONL execution traces in `leaf_out/`. Useful for path coverage measurement and lightweight dynamic analysis.
   </Card>
-  <Card title="runtime_noop" icon="circle-check">
+  <Card title="runtime_noop" icon="circle-check" href="/concepts/backends#building-a-backend">
     **No-op backend.** Accepts all callbacks and discards them immediately. Produces no output. Use this to verify that your program compiles and links correctly with `leafc` before committing to a heavier backend.
   </Card>
 </CardGroup>

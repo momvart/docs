@@ -88,16 +88,16 @@ Leaf transforms an ordinary Rust program into an instrumented binary that report
 ## Component Roles at a Glance
 
 <CardGroup cols={2}>
-  <Card title="leafc" icon="hammer">
+  <Card title="leafc" icon="hammer" href="/concepts/instrumentation">
     A drop-in `rustc` wrapper that hooks into Rust's MIR pipeline. It adds instrumentation callbacks at every branch, assignment, and function call before code generation, producing a standard binary that dynamically links against the backend.
   </Card>
-  <Card title="Runtime backend" icon="plug">
+  <Card title="Runtime backend" icon="plug" href="/concepts/backends">
     A shared library (`libleafrt.so`) loaded at startup by the instrumented binary. It receives callbacks from the instrumentation layer, tracks symbolic state, and optionally queries an SMT solver to produce analysis outputs.
   </Card>
-  <Card title="Symbolic variables" icon="variable">
+  <Card title="Symbolic variables" icon="variable" href="/concepts/symbolic-execution">
     Program values annotated with `mark_symbolic()`. They act as the unknowns in the constraint system. Leaf tracks every operation on them and records branch conditions as logical formulas over these unknowns.
   </Card>
-  <Card title="Output artifacts" icon="file-export">
+  <Card title="Output artifacts" icon="file-export" href="/reference/output-formats">
     Results written to the `leaf_out/` directory. Depending on the backend, these include binary diverging-input files (one byte per `u8` symbolic variable), JSONL execution traces, or structured constraint logs.
   </Card>
 </CardGroup>

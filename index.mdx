@@ -1,5 +1,5 @@
 ---
-title: "Leaf — Concolic Execution Framework for Rust"
+title: "Leaf — Dynamic Symbolic Analysis for Rust Programs"
 sidebarTitle: "Home"
 description: "Leaf instruments Rust programs at the MIR level for dynamic symbolic analysis, diverging input generation, and hybrid fuzzing via pluggable backends."
 ---
@@ -21,7 +21,7 @@ Leaf is a concolic execution framework for Rust that works by instrumenting your
   </Card>
 </CardGroup>
 
-## Get up and running in four steps
+## Get up and running in five steps
 
 <Steps>
   <Step title="Install leafc">
@@ -37,6 +37,16 @@ Leaf is a concolic execution framework for Rust that works by instrumenting your
 
     ```bash
     cargo build -p runtime_symex
+    ```
+  </Step>
+  <Step title="Link the shared library">
+    Create the expected directory, symlink the compiled library into it, and export the path so instrumented binaries can find it at startup.
+
+    ```bash
+    mkdir -p target/debug/runtime_symex
+    ln -sf "$(find target/debug -maxdepth 1 -name 'libleafrt*.so' | head -n 1)" \
+        target/debug/runtime_symex/libleafrt.so
+    export LD_LIBRARY_PATH="$PWD/target/debug/runtime_symex:$LD_LIBRARY_PATH"
     ```
   </Step>
   <Step title="Compile your program with leafc">

@@ -138,6 +138,17 @@ Here is what each key line means:
 
 The backend also writes the solution to the `output/` directory as a binary file you can feed directly into a subsequent run or fuzzer corpus.
 
+## Instrumenting a Cargo project
+
+The `leafc` wrapper works wherever `rustc` does. To instrument a multi-crate Cargo project instead of a single source file, set the `RUSTC` environment variable and run `cargo build` as normal:
+
+```bash
+export RUSTC=leafc
+cargo build
+```
+
+Cargo will route every crate's compilation through `leafc`, injecting MIR instrumentation across the entire build graph. The same `LD_LIBRARY_PATH` and `LEAF_LOG` settings from this guide apply when you run the resulting binary.
+
 ## Next steps
 
 <CardGroup cols={2}>

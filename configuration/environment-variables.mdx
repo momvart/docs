@@ -109,7 +109,7 @@ Set these variables **before invoking `leafc`** (or before running `cargo build`
   ```
 
   <Warning>
-    Binaries built with `LEAFC_FORCE_NOOP=1` still link against the Leaf runtime library. They will not perform symbolic analysis, but they do depend on `libleafrt.so` being present at runtime.
+    Binaries built with `LEAFC_FORCE_NOOP=1` still link against the Leaf runtime stub (`libleafrt_noop.so`). They will not perform symbolic analysis, but they do require this stub library to be present at runtime.
   </Warning>
 </ParamField>
 
@@ -190,7 +190,7 @@ These variables wire `leafc` and its runtime library into a normal `cargo build`
 ## Usage patterns
 
 <CardGroup cols={2}>
-  <Card title="CI instrumented build" icon="gear">
+  <Card title="CI instrumented build" icon="gear" href="/guides/cargo-integration">
     ```bash
     export RUSTC=leafc
     export LEAFC_LOG_STYLE=never
@@ -206,7 +206,7 @@ These variables wire `leafc` and its runtime library into a normal `cargo build`
     cargo build --release
     ```
   </Card>
-  <Card title="Debug instrumentation issues" icon="bug">
+  <Card title="Debug instrumentation issues" icon="bug" href="/reference/troubleshooting">
     ```bash
     export RUSTC=leafc
     export LEAFC_LOG=debug

@@ -33,7 +33,6 @@ The `Symbolizable` trait is implemented for every primitive numeric type. Callin
 ```rust
 pub trait Symbolizable: Sized {
     fn mark_symbolic(self) -> Self;
-    fn symbolize(&self);
 }
 ```
 
@@ -56,16 +55,10 @@ pub trait Symbolizable: Sized {
   method in your instrumented code. The returned value has the same concrete
   representation but is tracked symbolically by the backend.
 
-  Internally, `mark_symbolic` calls `symbolize` and then returns `self`. This
-  means the concrete value is preserved and execution continues normally — the
-  backend observes the registration event and begins tracking the variable.
-</ParamField>
-
-<ParamField path="symbolize" type="fn(&self)">
-  The underlying implementation called by `mark_symbolic`. Notifies the runtime
-  backend of a new symbolic variable by passing the concrete value and type
-  metadata. You do not need to call this method directly; use `mark_symbolic`
-  instead.
+  `mark_symbolic` notifies the runtime backend of the new symbolic variable,
+  then returns `self` unchanged. The concrete value is preserved and execution
+  continues normally — the backend observes the registration event and begins
+  tracking the variable.
 </ParamField>
 
 ### Example
@@ -192,11 +185,11 @@ The `leaf::annotations::tags` module re-exports any built-in tag constants provi
 ## Behavioural summary
 
 <CardGroup cols={2}>
-  <Card title="Concrete execution" icon="play">
+  <Card title="Concrete execution" icon="play" href="/reference/runtime-backends">
     `mark_symbolic()` returns `self` unchanged. `push_tag` and `pop_tag` are
     no-ops. Zero overhead in production builds compiled without `leafc`.
   </Card>
-  <Card title="Instrumented execution" icon="magnifying-glass">
+  <Card title="Instrumented execution" icon="magnifying-glass" href="/reference/runtime-backends">
     `mark_symbolic()` registers the value with the backend. Tags are recorded
     alongside constraints so you can filter results in `leaf_config.toml`.
   </Card>

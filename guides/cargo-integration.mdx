@@ -78,10 +78,14 @@ The following sequence instruments a binary called `my_analyzer`, runs it with t
 # Build the instrumented binary into a separate directory
 $ RUSTC=leafc cargo build --bin my_analyzer --target-dir ./target/leaf
 
-# Set up the runtime shared library (see the Analyzing a Program guide)
-$ export LD_LIBRARY_PATH="$PWD/target/debug/runtime_symex:$LD_LIBRARY_PATH"
+# Set up the runtime shared library from the Leaf repository root
+# (if you have not already done this, see the Analyzing a Program guide)
+leaf$ mkdir -p target/debug/runtime_symex
+leaf$ ln -sf "$(find target/debug -maxdepth 1 -name 'libleafrt*.so' | head -n 1)" \
+    target/debug/runtime_symex/libleafrt.so
+leaf$ export LD_LIBRARY_PATH="$PWD/target/debug/runtime_symex:$LD_LIBRARY_PATH"
 
-# Run with logging enabled
+# Run with logging enabled (from your project directory)
 $ LEAF_LOG=info ./target/leaf/debug/my_analyzer
 ```
 

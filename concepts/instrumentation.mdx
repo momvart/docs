@@ -67,18 +67,27 @@ rustc = "leafc"
 
 ## Configuring Instrumentation Scope
 
-`leafc` reads a configuration file named `leafc_config.toml` from the current directory (or from the path specified by the `LEAFC_CONFIG` environment variable). This file controls which crates and operations are instrumented, letting you exclude noisy or irrelevant code from the analysis.
+`leafc` reads a configuration file named `leafc_config.toml`, searching from the current directory up through its ancestors. This file controls which crates and functions are instrumented, letting you exclude noisy or irrelevant code from the analysis. Individual settings can also be overridden via environment variables using the `LEAFC_` prefix (for example, `LEAFC__CODEGEN_ALL_MIR=false`).
+
+The primary mechanism for scoping instrumentation is the `[[instr_rules.exclude]]` table array. Each entry specifies an entity type and a set of matching conditions using a logic-formula pattern:
 
 ```toml
 # leafc_config.toml
 
-[instrumentation]
-# Exclude specific crates from instrumentation entirely.
-exclude_crates = ["serde", "regex"]
+# Exclude all bodies in a specific crate from instrumentation.
+[[instr_rules.exclude]]
+entity = "body"
+all = [
+    { crate = { name = "serde" } },
+]
 
-# Limit instrumentation to only the crates listed here.
-# Omit this key to instrument all non-excluded crates.
-# include_crates = ["my_crate"]
+# Exclude a specific dynamic dispatch definition matched by path pattern.
+[[instr_rules.exclude]]
+entity = "dyn_def"
+all = [
+    { crate = { name = "regex" } },
+    { def_path = '<&.* as .*Automaton>::\w+' },
+]
 ```
 
 <Warning>

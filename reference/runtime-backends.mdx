@@ -8,20 +8,20 @@ Leaf's analysis happens at runtime, not compile time. After you instrument your 
 
 ## How backends work
 
-When your `leafc`-compiled binary starts, it dynamically loads whichever `libleafrt*.so` is on `LD_LIBRARY_PATH`. The backend registers itself and then receives callbacks for every instrumented MIR operation — assignments, branches, function calls, and symbolic variable registrations. Swapping backends requires only rebuilding the desired backend and updating `LD_LIBRARY_PATH`; you do not need to recompile your program.
+When your `leafc`-compiled binary starts, it dynamically loads whichever `libleafrt.so` is on `LD_LIBRARY_PATH`. The backend registers itself and then receives callbacks for every instrumented MIR operation — assignments, branches, function calls, and symbolic variable registrations. Swapping backends requires only rebuilding the desired backend and updating `LD_LIBRARY_PATH`; you do not need to recompile your program.
 
 ### Shared library naming
 
-Each flavor produces a `cdylib` with a distinct internal name. After building, the `.so` file appears as `target/debug/libleafrt_<name>.so` (or `target/release/` for release builds). Because the instrumented binary looks for a library named `libleafrt.so`, you create a symlink:
+Each flavor produces a `cdylib` with a distinct file name. After building, the `.so` file appears as `target/debug/libleafrt_<name>.so` (or `target/release/` for release builds). Because the instrumented binary looks for a library named `libleafrt.so`, you create a symlink in a per-backend directory:
 
 ```bash
 mkdir -p target/debug/<backend_name>
-ln -sf "$(find target/debug -maxdepth 1 -name 'libleafrt*.so' | head -n 1)" \
+ln -sf "$PWD/target/debug/libleafrt_<name>.so" \
     target/debug/<backend_name>/libleafrt.so
 export LD_LIBRARY_PATH="$PWD/target/debug/<backend_name>:$LD_LIBRARY_PATH"
 ```
 
-Replace `<backend_name>` with the flavor package name (e.g., `runtime_symex`).
+Replace `<backend_name>` with the flavor package name (e.g., `runtime_symex`) and `<name>` with the library stem for that backend (e.g., `symex`).
 
 ---
 
@@ -39,7 +39,7 @@ cargo build -p runtime_symex
 
 ```bash
 mkdir -p target/debug/runtime_symex
-ln -sf "$(find target/debug -maxdepth 1 -name 'libleafrt*.so' | head -n 1)" \
+ln -sf "$PWD/target/debug/libleafrt_symex.so" \
     target/debug/runtime_symex/libleafrt.so
 export LD_LIBRARY_PATH="$PWD/target/debug/runtime_symex:$LD_LIBRARY_PATH"
 export LEAF_LOG=info
@@ -82,7 +82,7 @@ cargo build -p runtime_symex_no_implicit
 
 ```bash
 mkdir -p target/debug/runtime_symex_no_implicit
-ln -sf "$(find target/debug -maxdepth 1 -name 'libleafrt*.so' | head -n 1)" \
+ln -sf "$PWD/target/debug/libleafrt_symex_no_implicit.so" \
     target/debug/runtime_symex_no_implicit/libleafrt.so
 export LD_LIBRARY_PATH="$PWD/target/debug/runtime_symex_no_implicit:$LD_LIBRARY_PATH"
 ```
@@ -107,7 +107,7 @@ cargo build -p runtime_cf_tracer
 
 ```bash
 mkdir -p target/debug/runtime_cf_tracer
-ln -sf "$(find target/debug -maxdepth 1 -name 'libleafrt*.so' | head -n 1)" \
+ln -sf "$PWD/target/debug/libleafrt_cf_tracer.so" \
     target/debug/runtime_cf_tracer/libleafrt.so
 export LD_LIBRARY_PATH="$PWD/target/debug/runtime_cf_tracer:$LD_LIBRARY_PATH"
 ```
@@ -119,11 +119,11 @@ export LD_LIBRARY_PATH="$PWD/target/debug/runtime_cf_tracer:$LD_LIBRARY_PATH"
 **When to use**
 
 <CardGroup cols={2}>
-  <Card title="Path exploration" icon="route">
+  <Card title="Path exploration" icon="route" href="/reference/output-formats">
     Understand which code paths a given input exercises before committing to
     full symbolic analysis.
   </Card>
-  <Card title="Regression tracing" icon="code-branch">
+  <Card title="Regression tracing" icon="code-branch" href="/reference/output-formats">
     Record execution traces for two runs and compare them to identify where
     behaviour diverged.
   </Card>
@@ -145,7 +145,7 @@ cargo build -p runtime_noop
 
 ```bash
 mkdir -p target/debug/runtime_noop
-ln -sf "$(find target/debug -maxdepth 1 -name 'libleafrt*.so' | head -n 1)" \
+ln -sf "$PWD/target/debug/libleafrt_noop.so" \
     target/debug/runtime_noop/libleafrt.so
 export LD_LIBRARY_PATH="$PWD/target/debug/runtime_noop:$LD_LIBRARY_PATH"
 ```
@@ -170,7 +170,7 @@ cargo build -p runtime_mdsan
 
 ```bash
 mkdir -p target/debug/runtime_mdsan
-ln -sf "$(find target/debug -maxdepth 1 -name 'libleafrt*.so' | head -n 1)" \
+ln -sf "$PWD/target/debug/libleafrt_mdsan.so" \
     target/debug/runtime_mdsan/libleafrt.so
 export LD_LIBRARY_PATH="$PWD/target/debug/runtime_mdsan:$LD_LIBRARY_PATH"
 ```
@@ -194,7 +194,7 @@ You can switch the active backend at any time without recompiling your instrumen
   <Step title="Create the symlink directory">
     ```bash
     mkdir -p target/debug/runtime_cf_tracer
-    ln -sf "$(find target/debug -maxdepth 1 -name 'libleafrt*.so' | head -n 1)" \
+    ln -sf "$PWD/target/debug/libleafrt_cf_tracer.so" \
         target/debug/runtime_cf_tracer/libleafrt.so
     ```
   </Step>
@@ -205,12 +205,6 @@ You can switch the active backend at any time without recompiling your instrumen
     ```
   </Step>
 </Steps>
-
-<Warning>
-  If multiple `libleafrt*.so` files exist in `target/debug/`, the `find`
-  command above picks one arbitrarily. Always verify that the symlink points
-  to the correct backend before running your analysis.
-</Warning>
 
 ---
 

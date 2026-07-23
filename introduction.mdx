@@ -49,6 +49,28 @@ Leaf's workflow has three stages that stay cleanly separated from each other:
 | `common/` | Shared types and utilities used across the project |
 | `samples/` | Ready-to-run example programs, including `hello_world.rs` |
 
+## Cargo integration
+
+Because `leafc` is a drop-in wrapper around `rustc`, you can use it anywhere `cargo` accepts a custom compiler. Set the `RUSTC` environment variable before invoking `cargo build` to instrument an entire Cargo project:
+
+```bash
+export RUSTC=leafc
+cargo build
+```
+
+Cargo will compile all crates in the workspace through `leafc`, inserting MIR-level instrumentation into every crate that is not excluded. This is the recommended approach for analysing multi-file projects.
+
+## Controlling runtime output
+
+The runtime library reads the `LEAF_LOG` environment variable to control which log levels it emits. Set it before running an instrumented binary:
+
+```bash
+export LEAF_LOG="info"
+./my_program
+```
+
+Accepted values follow the standard `tracing` filter syntax: `error`, `warn`, `info`, `debug`, `trace`, or a comma-separated list of module-level filters such as `leafrt=debug,leafrt::backends=info`.
+
 ## Ready to try it?
 
 The fastest way to see Leaf in action is to run the `hello_world` sample end-to-end with the symbolic execution backend.
