@@ -1,0 +1,220 @@
+---
+title: "Environment Variables Reference for Leaf and leafc"
+sidebarTitle: "Environment Variables"
+description: "Complete reference for every environment variable consumed by Leaf's runtime, the leafc compiler wrapper, and Cargo integration — with usage examples."
+---
+
+Leaf and `leafc` are configured through a combination of TOML files and environment variables. Environment variables take precedence over file-based configuration and are especially useful in CI pipelines, container environments, and fuzzer harnesses where you cannot easily place files on disk.
+
+This page covers every variable recognised by the runtime (instrumented binary), the compiler wrapper, and the Cargo integration layer.
+
+---
+
+## Runtime variables
+
+Set these variables **before running your instrumented binary**. They control logging and configuration for the symbolic execution engine embedded in the binary.
+
+<ParamField path="LEAF_LOG" type="string">
+  Log level for the Leaf runtime. Accepts any directive understood by the [`tracing-subscriber`](https://docs.rs/tracing-subscriber) `EnvFilter`, including module-scoped levels.
+
+  Common values: `error`, `warn`, `info`, `debug`, `trace`.
+
+  ```bash
+  LEAF_LOG=info ./my_instrumented_binary
+  LEAF_LOG=debug ./my_instrumented_binary   # verbose — expect a lot of output
+  ```
+
+  If unset, the runtime defaults to suppressing most output (the `pri` and `z3` modules are silenced by default regardless of this setting).
+</ParamField>
+
+<ParamField path="LEAF_LOG_STYLE" type="string" default="(ANSI enabled)">
+  Controls ANSI colour codes in runtime log output. Set to `"false"` to disable colour — useful when piping logs to a file or a CI log viewer that does not interpret escape codes.
+
+  ```bash
+  LEAF_LOG_STYLE=false ./my_instrumented_binary 2>run.log
+  ```
+</ParamField>
+
+<ParamField path="LEAF_CONFIG_STR" type="string">
+  Provide the entire runtime configuration as an inline string instead of (or in addition to) a `leaf_config.toml` file. The string is merged on top of any config file found on disk.
+
+  You must also set `LEAF_CONFIG_STR_FMT` to tell Leaf how to parse the string.
+
+  ```bash
+  export LEAF_CONFIG_STR='
+  [call]
+  external_call = "panic"
+
+  [[outputs]]
+  type      = "file"
+  directory = "/tmp/leaf_out"
+  format    = "binary"
+  '
+  export LEAF_CONFIG_STR_FMT="toml"
+
+  ./my_instrumented_binary
+  ```
+</ParamField>
+
+<ParamField path="LEAF_CONFIG_STR_FMT" type="string">
+  The serialization format of the string passed in `LEAF_CONFIG_STR`. Must be set whenever `LEAF_CONFIG_STR` is used.
+
+  | Value | Format |
+  |-------|--------|
+  | `toml` | TOML |
+  | `json` | JSON |
+  | `json5` | JSON5 (relaxed JSON with comments) |
+  | `yaml` | YAML |
+  | `ron` | Rusty Object Notation |
+  | `ini` | INI / Windows INI |
+
+  ```bash
+  export LEAF_CONFIG_STR='{"call": {"external_call": "concretization"}}'
+  export LEAF_CONFIG_STR_FMT="json"
+  ```
+</ParamField>
+
+---
+
+## Compiler variables
+
+Set these variables **before invoking `leafc`** (or before running `cargo build` with `RUSTC=leafc`). They control logging and configuration for the compiler wrapper itself.
+
+<ParamField path="LEAFC_LOG" type="string">
+  Log level for the `leafc` compiler wrapper, using the same `tracing-subscriber` directive syntax as `LEAF_LOG`. Logs are written to stderr during compilation.
+
+  ```bash
+  LEAFC_LOG=info cargo build
+  LEAFC_LOG=debug cargo build   # shows pass-by-pass instrumentation details
+  ```
+
+  Several noisy internal modules (`pass_objects`, `pri_discovery`, `bb_jump`) are suppressed regardless of this setting.
+</ParamField>
+
+<ParamField path="LEAFC_LOG_STYLE" type="string" default="(ANSI enabled)">
+  Controls ANSI colour codes in leafc log output. Set to `"never"` to disable colour. Useful when capturing build logs in CI or piping them through `tee`.
+
+  ```bash
+  LEAFC_LOG_STYLE=never LEAFC_LOG=info cargo build 2>build.log
+  ```
+</ParamField>
+
+<ParamField path="LEAFC_FORCE_NOOP" type="string">
+  When set to a truthy value (`1`, `true`, `on`, `yes`, or `y`), `leafc` acts as a transparent pass-through compiler: it accepts the same arguments as `rustc` but performs no instrumentation and injects no Leaf passes. The resulting binary is a normal, uninstrumented Rust binary.
+
+  Use this to verify that a crate compiles cleanly through `leafc`'s argument pipeline before enabling instrumentation, or to bisect a build failure.
+
+  ```bash
+  LEAFC_FORCE_NOOP=1 cargo build   # compile without any instrumentation
+  ```
+
+  <Warning>
+    Binaries built with `LEAFC_FORCE_NOOP=1` still link against the Leaf runtime library. They will not perform symbolic analysis, but they do depend on `libleafrt.so` being present at runtime.
+  </Warning>
+</ParamField>
+
+<ParamField path="LEAFC_CONFIG_STR" type="string">
+  Provide the entire `leafc_config.toml` configuration as an inline string. Merged on top of any `leafc_config.toml` found on disk. Requires `LEAFC_CONFIG_STR_FMT`.
+
+  ```bash
+  export LEAFC_CONFIG_STR='
+  [[instr_rules.exclude]]
+  entity = "dyn_def"
+  all = [{ crate = { name = "proc_macro2" } }]
+  '
+  export LEAFC_CONFIG_STR_FMT="toml"
+
+  cargo build
+  ```
+</ParamField>
+
+<ParamField path="LEAFC_CONFIG_STR_FMT" type="string">
+  The format of the string passed in `LEAFC_CONFIG_STR`. Accepts the same values as `LEAF_CONFIG_STR_FMT`: `toml`, `json`, `json5`, `yaml`, `ron`, `ini`.
+</ParamField>
+
+---
+
+## Cargo integration variables
+
+These variables wire `leafc` and its runtime library into a normal `cargo build` invocation.
+
+<ParamField path="RUSTC" type="string">
+  Tells Cargo to use a custom compiler binary instead of `rustc`. Set this to the path of `leafc` (or simply `leafc` if it is on your `PATH`) to instrument your entire workspace in a single `cargo build`:
+
+  ```bash
+  RUSTC=leafc cargo build --release
+  ```
+
+  You can also pin it in a [`.cargo/config.toml`](https://doc.rust-lang.org/cargo/reference/config.html) file:
+
+  ```toml
+  # .cargo/config.toml
+  [build]
+  rustc = "leafc"
+  ```
+</ParamField>
+
+<ParamField path="LD_LIBRARY_PATH" type="string">
+  The directory containing `libleafrt.so` (the Leaf runtime dynamic library) must be on the dynamic linker search path when you run an instrumented binary. Without this, the binary will fail to start with a missing-library error.
+
+  ```bash
+  export LD_LIBRARY_PATH="/path/to/leaf/target/release:$LD_LIBRARY_PATH"
+  ./my_instrumented_binary
+  ```
+
+  <Note>
+    `leafc` embeds an RPATH header into every binary it produces, pointing at the directory where `libleafrt.so` lives at compile time. If you run the binary on the same machine where it was compiled and have not moved any files, you typically do not need to set `LD_LIBRARY_PATH` manually.
+  </Note>
+</ParamField>
+
+---
+
+## Quick-reference table
+
+| Variable | Scope | Purpose |
+|----------|-------|---------|
+| `LEAF_LOG` | Runtime | Log level for the instrumented binary |
+| `LEAF_LOG_STYLE` | Runtime | Set to `false` to strip ANSI colour from runtime logs |
+| `LEAF_CONFIG_STR` | Runtime | Inline runtime configuration string |
+| `LEAF_CONFIG_STR_FMT` | Runtime | Format of `LEAF_CONFIG_STR` |
+| `LEAFC_LOG` | Compiler | Log level for `leafc` |
+| `LEAFC_LOG_STYLE` | Compiler | Set to `never` to strip ANSI colour from compiler logs |
+| `LEAFC_FORCE_NOOP` | Compiler | Pass-through mode — disable all instrumentation |
+| `LEAFC_CONFIG_STR` | Compiler | Inline compiler configuration string |
+| `LEAFC_CONFIG_STR_FMT` | Compiler | Format of `LEAFC_CONFIG_STR` |
+| `RUSTC` | Cargo | Set to `leafc` to instrument via `cargo build` |
+| `LD_LIBRARY_PATH` | OS linker | Must include the directory containing `libleafrt.so` |
+
+---
+
+## Usage patterns
+
+<CardGroup cols={2}>
+  <Card title="CI instrumented build" icon="gear">
+    ```bash
+    export RUSTC=leafc
+    export LEAFC_LOG_STYLE=never
+    export LEAFC_LOG=warn
+    export LEAF_LOG_STYLE=false
+    export LEAF_CONFIG_STR_FMT=toml
+    export LEAF_CONFIG_STR='
+    [[outputs]]
+    type      = "file"
+    directory = "/artifacts/leaf_out"
+    format    = "binary"
+    '
+    cargo build --release
+    ```
+  </Card>
+  <Card title="Debug instrumentation issues" icon="bug">
+    ```bash
+    export RUSTC=leafc
+    export LEAFC_LOG=debug
+    export LEAFC_FORCE_NOOP=1   # confirm build works first
+    cargo build
+
+    unset LEAFC_FORCE_NOOP      # now enable instrumentation
+    cargo build
+    ```
+  </Card>
+</CardGroup>

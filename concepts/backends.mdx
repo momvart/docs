@@ -1,0 +1,130 @@
+---
+title: "Runtime Backends: Choose the Right Analysis Engine"
+sidebarTitle: "Backends"
+description: "Compare Leaf's three runtime backends — symbolic execution, control-flow tracing, and no-op — and learn how to build, attach, and switch between them."
+---
+
+A Leaf runtime backend is a shared library (`libleafrt.so`) that the instrumented binary loads at startup via `LD_LIBRARY_PATH`. The backend implements the callback interface that `leafc`-instrumented code expects: every branch, assignment, and operation on a symbolic variable triggers a call into the loaded library. What the backend *does* with those callbacks — solve constraints, record traces, or ignore them entirely — is entirely up to the backend implementation.
+
+This pluggable design means you can change your analysis strategy without recompiling your program. Build a different backend, update `LD_LIBRARY_PATH`, and re-run. Leaf ships three backends, each suited to a different goal.
+
+## Available Backends
+
+<CardGroup cols={3}>
+  <Card title="runtime_symex" icon="brain">
+    **Full symbolic execution.** Tracks symbolic constraints on marked variables, queries the Z3 SMT solver to generate diverging inputs, and writes results to `leaf_out/`. This is the primary backend for path exploration, reachability analysis, and hybrid fuzzing seed generation.
+  </Card>
+  <Card title="runtime_cf_tracer" icon="route">
+    **Control-flow tracer.** Records the sequence of branches and basic blocks visited during execution without invoking a solver. Produces JSONL execution traces in `leaf_out/`. Useful for path coverage measurement and lightweight dynamic analysis.
+  </Card>
+  <Card title="runtime_noop" icon="circle-check">
+    **No-op backend.** Accepts all callbacks and discards them immediately. Produces no output. Use this to verify that your program compiles and links correctly with `leafc` before committing to a heavier backend.
+  </Card>
+</CardGroup>
+
+### Detailed Comparison
+
+| | `runtime_symex` | `runtime_cf_tracer` | `runtime_noop` |
+|---|---|---|---|
+| **Build target** | `cargo build -p runtime_symex` | `cargo build -p runtime_cf_tracer` | `cargo build -p runtime_noop` |
+| **Solves constraints** | ✅ Yes (Z3) | ❌ No | ❌ No |
+| **Output in `leaf_out/`** | Diverging input files, constraint logs | JSONL execution traces | None |
+| **Runtime overhead** | Medium–high (solver queries) | Low (trace writing only) | Minimal |
+| **Primary use case** | Path exploration, diverging input generation, hybrid fuzzing | Coverage tracing, execution recording | Compilation smoke-testing |
+| **Z3 dependency** | Required | Not required | Not required |
+
+## Building a Backend
+
+All backends are Cargo crates in the Leaf workspace. Build the one you need from the repository root:
+
+<CodeGroup>
+```bash Symbolic Execution
+cargo build -p runtime_symex
+```
+
+```bash Control-Flow Tracer
+cargo build -p runtime_cf_tracer
+```
+
+```bash No-Op
+cargo build -p runtime_noop
+```
+</CodeGroup>
+
+By default, these produce debug builds. Use `--release` for lower overhead in longer-running analyses:
+
+```bash
+cargo build -p runtime_symex --release
+```
+
+## Attaching a Backend to Your Binary
+
+After building, link the shared library into a named directory and export that directory on `LD_LIBRARY_PATH`. The instrumented binary searches for a file named exactly `libleafrt.so` in the directories on that path.
+
+```bash
+# Example: attaching runtime_symex
+mkdir -p target/debug/runtime_symex
+ln -sf "$(find target/debug -maxdepth 1 -name 'libleafrt*.so' | head -n 1)" \
+    target/debug/runtime_symex/libleafrt.so
+
+export LD_LIBRARY_PATH="$PWD/target/debug/runtime_symex:$LD_LIBRARY_PATH"
+```
+
+Then run your instrumented binary normally:
+
+```bash
+export LEAF_LOG="info"
+./hello_world
+```
+
+<Note>
+  The `find` command above handles the fact that the built `.so` file may carry a version suffix or platform-specific name. The symlink normalizes it to the `libleafrt.so` name the instrumented binary expects.
+</Note>
+
+## Switching Between Backends
+
+To switch backends, rebuild the desired backend (if not already built), update the symlink, and re-export `LD_LIBRARY_PATH`. You do not need to recompile your program.
+
+```bash
+# Switch from runtime_symex to runtime_cf_tracer
+cargo build -p runtime_cf_tracer
+
+mkdir -p target/debug/runtime_cf_tracer
+ln -sf "$(find target/debug -maxdepth 1 -name 'libleafrt*.so' | head -n 1)" \
+    target/debug/runtime_cf_tracer/libleafrt.so
+
+export LD_LIBRARY_PATH="$PWD/target/debug/runtime_cf_tracer:$LD_LIBRARY_PATH"
+
+./hello_world
+```
+
+<Tip>
+  Keep separate directories for each backend's symlink (as shown above) so you can switch by changing only the `LD_LIBRARY_PATH` value rather than overwriting a shared symlink. This is especially useful in scripts that run multiple analysis passes.
+</Tip>
+
+## Backend Output Artifacts
+
+Each backend writes its results to the `leaf_out/` directory in the current working directory when the instrumented binary runs.
+
+**`runtime_symex` outputs:**
+
+- Binary diverging-input files — one file per diverging input found during the run. If all symbolic variables are `u8`, each byte in the file corresponds to one symbolic variable in the order they were marked. These files are intended as direct re-inputs to the program.
+- Constraint logs — a structured record of every constraint observed during the run and the solver's response.
+
+**`runtime_cf_tracer` outputs:**
+
+- JSONL trace files — one JSON object per line, each representing a basic block, branch, or function-call event visited during execution. Suitable for offline path coverage analysis or visualization.
+
+**`runtime_noop` outputs:**
+
+- Nothing. The directory `leaf_out/` is not created.
+
+<Warning>
+  `leaf_out/` is created relative to the working directory at the time the binary runs, not relative to the binary's location. If you run the binary from different directories in different experiments, each run writes to a separate `leaf_out/`. Standardize your working directory in test scripts to avoid scattering output.
+</Warning>
+
+## How Backends Implement the Interface
+
+The `runtime/lib` crate (`leafrt`) defines the callback interface that all backends must implement. A backend is compiled as a `cdylib` that exports the symbols `leafrt` expects to call. The `runtime_noop` backend is the simplest possible implementation — every callback is an empty function — and serves as a reference template when writing custom backends.
+
+If the three built-in backends do not meet your needs, you can implement your own by depending on the `leaf_runtime` crate and implementing its trait interface. Custom backends follow the same build and linking workflow as the built-in ones.

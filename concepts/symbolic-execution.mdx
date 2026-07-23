@@ -1,0 +1,82 @@
+---
+title: "Concolic Execution in Leaf: Concepts and Use Cases"
+sidebarTitle: "Symbolic Execution"
+description: "Understand concolic execution — how Leaf tracks symbolic constraints during a concrete run and uses Z3 to generate diverging inputs for path exploration."
+---
+
+Leaf is built around *concolic execution* — a hybrid technique that runs your program on a real, concrete input while simultaneously maintaining a symbolic model of how marked variables influence program behavior. Unlike pure symbolic execution, which reasons about all possible inputs at once, concolic execution always produces an actual execution trace. The symbolic reasoning happens as a secondary bookkeeping pass on top of that trace, which keeps the analysis grounded and scalable for real Rust code.
+
+## Concrete and Symbolic, Simultaneously
+
+The name "concolic" is a portmanteau of **concrete** and **symbolic**. When you run a Leaf-instrumented binary, two things happen at the same time:
+
+- **Concrete execution** proceeds normally. The program reads real values, takes real branches, and produces real output. Nothing about the observable behavior of the program changes.
+- **Symbolic tracking** runs in parallel inside the backend. For every variable you marked with `mark_symbolic()`, the backend maintains a formula that describes what values that variable *could* take. Every arithmetic operation, comparison, and branch that touches a symbolic variable extends this formula.
+
+Because the concrete execution always completes, you never face the path-explosion problem that plagues pure symbolic execution. The trade-off is that a single concolic run only explores one path — but Leaf addresses this through diverging input generation.
+
+## From Constraints to Diverging Inputs
+
+At each conditional branch that depends on a symbolic variable, Leaf records a *path constraint* — a logical formula that captures the condition the branch imposed. For example, if your program executes `if x < 5` and the concrete value of `x` is `10`, the branch is not taken. Leaf records the constraint `¬(x < 5)` (i.e., the branch condition that was *not* satisfied).
+
+To explore the other path — the one where `x < 5` is satisfied — Leaf negates the constraint and asks the Z3 SMT solver for a concrete value of `x` that satisfies it. Z3 returns, for instance, `x = 0`. That value is a *diverging input*: a concrete assignment that would cause execution to branch differently at this point compared to the current run.
+
+```log
+INFO leafrt::backends::basic::sym_vars  Added a new symbolic variable: <Var1: u8> = 10u8
+INFO leafrt::trace::log                 Notified about constraint {!(<(<Var1: u8>, 5u8))} at step Def(0:5)[2]
+INFO leafrt::outgen                     Found a solution:
+{
+    "1": 0u8,
+}
+```
+
+The backend writes each solution to `leaf_out/` as a binary file or structured record. You can then re-run the instrumented binary with that diverging input to explore the alternative path, generating further diverging inputs along the way.
+
+## Path Coverage Through Iteration
+
+A single concolic execution explores exactly one path through your program. But by iterating — running with the original input, collecting diverging inputs, running with each of those, and so on — you systematically cover more and more paths. This is called *pure concolic testing*, a term also used by [SymCC](https://github.com/eurecom-s3/symcc), a comparable tool for C/C++ programs.
+
+Each iteration explores a new path by flipping one branch condition relative to a previous execution. The process continues until no new diverging inputs are found, meaning all reachable paths under the symbolic variables have been explored.
+
+<Note>
+  Leaf generates diverging inputs opportunistically during a single execution: each time a new branch constraint is observed, the backend immediately queries Z3 and writes the solution. You do not need a separate solver invocation step — it happens transparently as part of the run.
+</Note>
+
+## How Leaf Compares to Similar Approaches
+
+Understanding where concolic execution fits in the broader testing landscape helps you decide when to reach for Leaf.
+
+<CardGroup cols={3}>
+  <Card title="Pure Symbolic Execution" icon="sigma">
+    Reasons about all possible inputs simultaneously, building a tree of path conditions. Powerful for exhaustive coverage of small programs but does not scale well to real-world code with loops, large state, or external calls.
+  </Card>
+  <Card title="Concolic Execution (Leaf)" icon="code-branch">
+    Runs concretely on one input at a time, tracking symbolic constraints on the side. Scales to real Rust programs, handles external calls naturally, and produces concrete diverging inputs ready to re-run. Closest comparable tool: SymCC.
+  </Card>
+  <Card title="Coverage-Guided Fuzzing" icon="shuffle">
+    Mutates inputs randomly and uses coverage feedback to guide exploration. Excellent at finding shallow bugs quickly but struggles with complex structured conditions (e.g., magic-byte checks) that require solver assistance.
+  </Card>
+</CardGroup>
+
+### Combining Concolic Execution with Fuzzing
+
+Concolic execution and fuzzing are complementary. Fuzzing is fast and broad; concolic execution is slower but precise about conditions that require exact values. Leaf is designed to integrate into hybrid fuzzing pipelines — the diverging inputs it generates can be fed directly to a fuzzer (such as LibAFL) as high-quality seeds that bypass conditions the fuzzer could not easily guess.
+
+<Tip>
+  If your program contains conditions like `if checksum == 0xDEADBEEF`, a fuzzer will almost never flip that branch by mutation alone. A single concolic run will produce an exact input that satisfies the condition. Combine both tools for the best coverage.
+</Tip>
+
+## When to Use Concolic Execution
+
+Use Leaf's concolic execution when you want to:
+
+- **Generate test inputs that cover hard-to-reach branches** — especially those guarded by arithmetic, checksum, or hash conditions.
+- **Prove reachability** of a specific code path by asking "does an input exist that takes this branch?"
+- **Augment a fuzzing campaign** with solver-derived seeds that unlock new coverage without manual input crafting.
+- **Analyze a specific function** in isolation by marking its arguments symbolic and observing what constraints it imposes on its inputs.
+
+Concolic execution is less suited for scenarios where you need exhaustive analysis of all possible program behaviors simultaneously (prefer model checking or abstract interpretation) or where execution speed is critical and you need millions of runs per second (prefer pure fuzzing without the solver overhead).
+
+## The Role of Z3
+
+Leaf's symbolic execution backend uses the [Z3 theorem prover](https://github.com/Z3Prover/z3) to solve path constraints. Z3 is an industrial-strength SMT (Satisfiability Modulo Theories) solver that supports the bitvector arithmetic, integer arithmetic, and Boolean logic that appear in typical Rust programs. When the backend collects a constraint, it encodes it in Z3's query language, asserts the negation, and asks Z3 whether a satisfying assignment exists. If Z3 returns `sat`, the assignment is extracted and written as a diverging input. If Z3 returns `unsat`, the branch is infeasible from the current symbolic state and no input is generated for it.

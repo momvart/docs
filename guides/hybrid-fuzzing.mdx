@@ -1,0 +1,184 @@
+---
+title: "Hybrid Fuzzing with Leaf and the LibAFL Integration"
+sidebarTitle: "Hybrid Fuzzing"
+description: "Upgrade an existing libfuzzer-sys fuzz target into a hybrid fuzzer by combining LibAFL coverage-guided fuzzing with Leaf concolic execution."
+---
+
+Coverage-guided fuzzers are fast at finding shallow bugs, but they struggle to generate inputs that satisfy complex branch conditions like checksum validations or length-prefixed fields. Concolic execution is effective at exactly those cases but is too slow to run at fuzzing throughput on its own. Hybrid fuzzing combines both: the fuzzer drives rapid exploration, and Leaf's concolic engine runs in a separate stage on interesting test cases to generate solver-found inputs that bypass branch conditions the fuzzer would never reach by mutation alone.
+
+<Note>
+This guide covers the LibAFL integration layer included in the Leaf repository. The orchestrator tool `leafo_onetime` referenced in older documentation has been moved out of the main project. The integration described here uses the `libafl_libfuzzer` package and the `runtime_symex` backend directly.
+</Note>
+
+## How Hybrid Fuzzing Works in Leaf
+
+<Steps>
+  <Step title="Fuzzer generates a test case">
+    LibAFL's coverage-guided fuzzer mutates its corpus and produces a new input, as in normal libFuzzer-style fuzzing.
+  </Step>
+  <Step title="Concolic stage runs the instrumented binary">
+    A dedicated LibAFL stage runs your Leaf-instrumented binary with the current test case as input. The `runtime_symex` backend records path constraints for every symbolic branch encountered.
+  </Step>
+  <Step title="Solver finds diverging inputs">
+    The backend queries Z3 for concrete values that would take unexplored branches, producing binary diverging input files.
+  </Step>
+  <Step title="Inputs are fed back to the fuzzer">
+    The diverging inputs are offered to the fuzzer as new corpus entries. The fuzzer evaluates them for coverage, adding any that reach new code to its corpus for further mutation.
+  </Step>
+</Steps>
+
+## Prerequisites
+
+Before you begin, confirm that:
+
+- `leafc` is installed (`cargo install --path ./compiler` from the Leaf root).
+- The `runtime_symex` backend is built (`cargo build -p runtime_symex`).
+- `LD_LIBRARY_PATH` is configured so the instrumented binary can find `libleafrt.so` (see the [Analyzing a Program guide](/guides/analyzing-a-program)).
+- You have an existing fuzz target written using `libfuzzer-sys` via `cargo-fuzz`.
+
+Your starting fuzz target should look like this:
+
+```rust
+#![no_main]
+
+use libfuzzer_sys::fuzz_target;
+
+fuzz_target!(|data: &[u8]| {
+    // fuzzed code goes here
+});
+```
+
+## Step-by-Step Setup
+
+### 1. Replace libfuzzer-sys with Leaf's implementation
+
+In the `Cargo.toml` of your fuzz project, replace the `libfuzzer-sys` dependency with Leaf's `libafl_libfuzzer` package. Keep any existing feature flags:
+
+```toml
+# From
+libfuzzer-sys = { version = "..." }
+
+# To
+libfuzzer-sys = { git = "https://github.com/sfu-rsl/leaf.git", package = "libafl_libfuzzer" }
+```
+
+If you have cargo-fuzz features enabled, carry them across:
+
+```toml
+# From
+libfuzzer-sys = { version = "...", features = ["your", "features", "here"] }
+
+# To
+libfuzzer-sys = { git = "https://github.com/sfu-rsl/leaf.git", package = "libafl_libfuzzer", features = ["your", "features", "here"] }
+```
+
+Leaf's `libafl_libfuzzer` is built on top of LibAFL's own libFuzzer implementation, so the same configuration options and flags apply.
+
+### 2. Switch to hybrid_fuzz_target and make no_main conditional
+
+Make two changes to your fuzz target source file:
+
+1. Change `fuzz_target!` to `hybrid_fuzz_target!`
+2. Make the `no_main` attribute conditional on *not* compiling with `leafc`
+
+```rust
+#![cfg_attr(not(leafc), no_main)]
+
+use libfuzzer_sys::hybrid_fuzz_target;
+
+hybrid_fuzz_target!(|data: &[u8]| {
+    // fuzzed code goes here
+});
+```
+
+The `hybrid_fuzz_target!` macro expands to two things: the normal fuzzer entry point used by LibAFL, and a `main` function that reads all of `stdin`, marks it as symbolic, and passes it to your closure. That `main` function is what `leafc` instruments and what the concolic stage invokes. The `#![cfg_attr(not(leafc), no_main)]` attribute ensures the generated `main` is present when compiling with `leafc` but suppressed when building the normal fuzzer binary.
+
+<Warning>
+Do not remove the `no_main` attribute entirely. The conditional `cfg_attr` form is required. Without `no_main` in the non-leafc build, the libFuzzer entry point will conflict with Rust's default `main` symbol.
+</Warning>
+
+### 3. Build the instrumented binary with leafc
+
+Build your fuzz target with `leafc` into a separate target directory to avoid invalidating the normal cargo-fuzz build cache:
+
+```console
+fuzz$ RUSTC=leafc cargo build --bin fuzz_target_1 --target-dir ./target/leaf
+```
+
+This produces an instrumented executable at `./target/leaf/debug/fuzz_target_1`.
+
+### 4. Build the normal fuzzer
+
+Build your fuzzer as you normally would with cargo-fuzz:
+
+```console
+fuzz$ cargo fuzz build fuzz_target_1
+```
+
+This produces the LibAFL-based fuzzer binary that will drive the campaign.
+
+### 5. Run the hybrid fuzzer
+
+Pass the `-conc_program` argument to the fuzzer, pointing it at the instrumented binary built in step 3:
+
+```console
+fuzz$ cargo fuzz run fuzz_target_1 -- -conc_program=./target/leaf/debug/fuzz_target_1
+```
+
+The fuzzer starts its normal coverage-guided loop. After evaluating each test case, the concolic stage runs the instrumented binary with that input, collects any diverging inputs the solver finds, and feeds them back into the fuzzer corpus automatically.
+
+## Full Workflow Summary
+
+<CodeGroup>
+```bash Setup
+# From the Leaf root: install compiler and build runtime
+cargo install --path ./compiler
+cargo build -p runtime_symex
+
+# Configure dynamic linker
+mkdir -p target/debug/runtime_symex
+ln -sf "$(find target/debug -maxdepth 1 -name 'libleafrt*.so' | head -n 1)" \
+    target/debug/runtime_symex/libleafrt.so
+export LD_LIBRARY_PATH="$PWD/target/debug/runtime_symex:$LD_LIBRARY_PATH"
+```
+
+```bash Build
+# From your fuzz project directory
+# Build instrumented binary
+RUSTC=leafc cargo build --bin fuzz_target_1 --target-dir ./target/leaf
+
+# Build normal fuzzer
+cargo fuzz build fuzz_target_1
+```
+
+```bash Run
+# Run hybrid fuzzer
+cargo fuzz run fuzz_target_1 -- -conc_program=./target/leaf/debug/fuzz_target_1
+```
+</CodeGroup>
+
+## Troubleshooting
+
+<CardGroup cols={2}>
+  <Card title="libleafrt.so not found" icon="triangle-exclamation">
+    Ensure `LD_LIBRARY_PATH` includes the directory containing `libleafrt.so`. Re-run the symlink and export commands from the setup step.
+  </Card>
+  <Card title="Linker errors building with leafc" icon="link-slash">
+    Make sure a working C toolchain and linker are available. `leafc` relies on the system linker for the final binary link step.
+  </Card>
+  <Card title="no_main conflict" icon="circle-xmark">
+    Confirm your `#![no_main]` is replaced with `#![cfg_attr(not(leafc), no_main)]`. A plain `#![no_main]` will suppress the `main` function needed by the concolic stage.
+  </Card>
+  <Card title="Solver timeouts" icon="clock">
+    The default Z3 timeout is 10 seconds per query. Adjust it in `leaf_config.toml` under `[solver.global_params]` if your program has complex constraints.
+  </Card>
+</CardGroup>
+
+<CardGroup cols={2}>
+  <Card title="Diverging Inputs" icon="code-branch" href="/guides/diverging-inputs">
+    Understand how Leaf generates solver-found inputs and reads output files.
+  </Card>
+  <Card title="Cargo Integration" icon="box" href="/guides/cargo-integration">
+    Learn more about using leafc in a Cargo workspace with a separate target directory.
+  </Card>
+</CardGroup>

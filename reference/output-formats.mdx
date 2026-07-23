@@ -1,0 +1,276 @@
+---
+title: "Output File Formats Reference for Leaf Analysis Runs"
+sidebarTitle: "Output Formats"
+description: "Reference for every file format Leaf writes to leaf_out/ — binary diverging inputs, JSONL traces, text sanity reports, and SMT-LIB2 solver logs."
+---
+
+Every time you run a `leafc`-instrumented binary with a capable backend, Leaf writes analysis artifacts to an output directory (default: `leaf_out/`). Understanding these files helps you interpret results, feed diverging inputs back into your program, and debug the analysis itself. This page describes every file type Leaf produces and how to configure them.
+
+---
+
+## Output directory
+
+By default all files go into `leaf_out/` relative to the current working directory. You control the directory and format for each output sink independently in `leaf_config.toml`. Each `[[outputs]]`, `[exe_trace.*_dump]`, and `[exe_trace.inspectors.output]` block accepts a `directory` key.
+
+```toml
+[[outputs]]
+type   = "file"
+directory = "leaf_out"
+format = "binary"
+```
+
+Leaf creates the output directory automatically if it does not exist.
+
+---
+
+## Binary diverging input files (`.bin`)
+
+<ResponseField name="format" type="binary">
+  Raw binary files containing one concrete value per symbolic variable,
+  packed in the order the variables were registered with
+  `mark_symbolic()`.
+</ResponseField>
+
+Binary files are the primary output of the symbolic execution backend. Each file represents one candidate input that, if used to re-run your program, would cause execution to diverge at a specific branch compared to the seed run.
+
+**Structure**
+
+- Each byte (or multi-byte value) corresponds to one symbolic variable.
+- Variables appear in the order `mark_symbolic()` was called during the seed execution.
+- For programs where all symbolic variables are `u8` values, the entire file maps directly to a stdin byte sequence — pass it with `< diverging_0.bin` or pipe it to your binary.
+
+**Re-executing with a diverging input**
+
+```bash
+# Re-run with a generated diverging input.
+./your_program < leaf_out/diverging_0.bin
+
+# Or pass it as a file argument, depending on your program.
+./your_program leaf_out/diverging_0.bin
+```
+
+**Configuration**
+
+```toml
+[[outputs]]
+type      = "file"
+directory = "leaf_out"
+format    = "binary"
+```
+
+<Note>
+  Binary files are only produced when the backend finds a satisfying assignment
+  for a set of constraints — typically the `runtime_symex` and
+  `runtime_symex_no_implicit` backends. The `runtime_cf_tracer` and
+  `runtime_noop` backends do not write binary outputs.
+</Note>
+
+---
+
+## JSONL trace files
+
+<ResponseField name="format" type="jsonl">
+  Newline-delimited JSON files where each line is a self-contained JSON object
+  describing one event, branch, constraint, or path condition.
+</ResponseField>
+
+The execution trace system produces up to three JSONL files per run, each capturing a different facet of the symbolic execution:
+
+### Control-flow dump
+
+Records each branch taken during execution. Each line describes one branch point: the MIR location, the branch condition, and which target was taken.
+
+```toml
+[exe_trace.control_flow_dump]
+type      = "file"
+directory = "leaf_out"
+format    = "jsonl"
+```
+
+### Constraints dump
+
+Records the constraint formula accumulated at each branch point. Each line contains the symbolic expression representing the path condition at that step. Use these files to inspect what constraints the solver is given.
+
+```toml
+[exe_trace.constraints_dump]
+type      = "file"
+directory = "leaf_out"
+format    = "jsonl"
+```
+
+### Preconditions dump
+
+Records the path preconditions — the logical conjunction of all constraints that must hold for execution to reach a given point. These are the formulas the solver negates to find diverging inputs.
+
+```toml
+[exe_trace.preconditions_dump]
+type      = "file"
+directory = "leaf_out"
+format    = "jsonl"
+```
+
+**Dump interval**
+
+The `dump_interval` key controls how frequently buffered trace data is flushed to disk (in number of steps). Lower values reduce data loss if execution crashes but increase I/O overhead.
+
+```toml
+[exe_trace]
+dump_interval = 5
+```
+
+---
+
+## Text sanity check files (`.txt`)
+
+<ResponseField name="format" type="txt">
+  Plain text files produced by the <code>sanity_checker</code> inspector when
+  it detects unsatisfiable constraints or traces.
+</ResponseField>
+
+The `sanity_checker` inspector monitors the constraint stream for logical inconsistencies — constraints that are unsatisfiable given the observed path conditions. When it finds one, it writes a report to a text file so you can investigate.
+
+Two sanity-checker sinks can be configured independently:
+
+### Trace-level sanity checker
+
+Fires when an entire execution trace is flagged as unsatisfiable. Configure the output prefix with `prefix`.
+
+```toml
+[[exe_trace.inspectors]]
+type  = "sanity_checker"
+level = "panic"
+[exe_trace.inspectors.output]
+type      = "file"
+directory = "leaf_out"
+format    = "txt"
+prefix    = "unsat_trace_"
+```
+
+Files are named `unsat_trace_<n>.txt`.
+
+### Constraint-level sanity checker
+
+Fires on individual constraints that are unsatisfiable in isolation.
+
+```toml
+[[exe_trace.constraint_filters]]
+type = "sanity_checker"
+[exe_trace.constraint_filters.output]
+type      = "file"
+directory = "leaf_out"
+format    = "txt"
+prefix    = "unsat_constraint_"
+```
+
+Files are named `unsat_constraint_<n>.txt`.
+
+<Warning>
+  When the trace-level checker's `level` is set to `"panic"`, Leaf will
+  terminate the analysis if an unsatisfiable trace is detected. Set it to a
+  lower severity if you want the run to continue past the anomaly.
+</Warning>
+
+---
+
+## SMT-LIB2 solver log (`.smt2`)
+
+<ResponseField name="format" type="smt2">
+  An SMT-LIB2 formatted log of every query sent to the Z3 solver. Useful for
+  offline debugging, replaying queries, or inspecting constraint complexity.
+</ResponseField>
+
+When you need to debug solver behaviour — timeout issues, unexpected `unsat` results, or incorrect solutions — enable the SMT-LIB2 log by adding a parameter to the `[solver.global_params]` table:
+
+```toml
+[solver]
+type = "z3"
+
+[solver.global_params]
+timeout = 10000
+# Uncomment to log all SMT queries to a file:
+# "solver.smtlib2_log" = "queries.smt2"
+```
+
+The file path is relative to the working directory. You can replay these queries directly with the `z3` command-line tool:
+
+```bash
+z3 queries.smt2
+```
+
+---
+
+## Complete `leaf_config.toml` reference
+
+The following snippet shows all output-related configuration keys in one place. Copy it to `leaf_config.toml` at the root of your project and adjust paths and formats as needed:
+
+```toml
+# ── Diverging input binary files ──────────────────────────────────────────────
+[[outputs]]
+type      = "file"
+directory = "leaf_out"
+format    = "binary"
+
+# ── Execution trace JSONL files ───────────────────────────────────────────────
+[exe_trace]
+dump_interval = 5
+
+[exe_trace.control_flow_dump]
+type      = "file"
+directory = "leaf_out"
+format    = "jsonl"
+
+[exe_trace.constraints_dump]
+type      = "file"
+directory = "leaf_out"
+format    = "jsonl"
+
+[exe_trace.preconditions_dump]
+type      = "file"
+directory = "leaf_out"
+format    = "jsonl"
+
+# ── Sanity checker (trace level) ──────────────────────────────────────────────
+[[exe_trace.inspectors]]
+type  = "sanity_checker"
+level = "panic"
+[exe_trace.inspectors.output]
+type      = "file"
+directory = "leaf_out"
+format    = "txt"
+prefix    = "unsat_trace_"
+
+# ── Sanity checker (constraint level) ────────────────────────────────────────
+[[exe_trace.constraint_filters]]
+type = "sanity_checker"
+[exe_trace.constraint_filters.output]
+type      = "file"
+directory = "leaf_out"
+format    = "txt"
+prefix    = "unsat_constraint_"
+
+# ── Diverging input inspector ─────────────────────────────────────────────────
+[[exe_trace.inspectors]]
+type             = "diverging_input"
+check_optimistic = true
+
+# ── Z3 solver ─────────────────────────────────────────────────────────────────
+[solver]
+type = "z3"
+[solver.global_params]
+timeout = 10000
+# "solver.smtlib2_log" = "queries.smt2"
+```
+
+---
+
+## File summary
+
+| File pattern | Format | Produced by | Contains |
+|---|---|---|---|
+| `diverging_<n>.bin` | Binary | `runtime_symex` | Concrete values for symbolic variables |
+| `control_flow_<n>.jsonl` | JSONL | `runtime_symex`, `runtime_cf_tracer` | Branch targets taken during execution |
+| `constraints_<n>.jsonl` | JSONL | `runtime_symex` | Constraint formula at each branch |
+| `preconditions_<n>.jsonl` | JSONL | `runtime_symex` | Path conditions accumulated per step |
+| `unsat_trace_<n>.txt` | Text | Sanity checker inspector | Unsatisfiable execution traces |
+| `unsat_constraint_<n>.txt` | Text | Sanity checker filter | Unsatisfiable individual constraints |
+| `queries.smt2` | SMT-LIB2 | Z3 solver (optional) | All SMT queries sent to Z3 |

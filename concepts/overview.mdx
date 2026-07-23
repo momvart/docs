@@ -1,0 +1,132 @@
+---
+title: "How Leaf Works: End-to-End Workflow Overview"
+sidebarTitle: "Overview"
+description: "Trace the full Leaf pipeline — from annotating symbolic variables through leafc compilation to runtime backend analysis and output artifacts."
+---
+
+Leaf transforms an ordinary Rust program into an instrumented binary that reports runtime events — branches taken, values assigned, constraints observed — to a pluggable analysis backend. You drive this process in four steps: annotate your source, compile with `leafc`, attach a backend, and run. Understanding each step helps you tune Leaf for your specific analysis goal, whether that is generating diverging inputs, recording control-flow traces, or integrating into a hybrid fuzzer.
+
+## The Four-Step Pipeline
+
+<Steps>
+  <Step title="Annotate symbolic variables">
+    Mark the program inputs you want Leaf to reason about by calling `mark_symbolic()` on them. Wrap the annotation in `#[cfg(leafc)]` so the code compiles normally with the standard `rustc` toolchain and only activates when built with `leafc`.
+
+    ```rust
+    fn main() {
+        let x: u8 = core::hint::black_box(10);
+        #[cfg(leafc)]
+        let x: u8 = {
+            use leaf::annotations::*;
+            x.mark_symbolic()
+        };
+
+        if x < 5 {
+            println!("Hello, world!");
+        }
+    }
+    ```
+
+    Any variable marked symbolic becomes a tracked quantity. Every branch or operation that depends on it is recorded by the backend at runtime.
+  </Step>
+
+  <Step title="Compile with leafc">
+    Replace `rustc` with `leafc` to compile your program. `leafc` is a thin wrapper around the Rust compiler that intercepts the MIR (Mid-level Intermediate Representation) pipeline and inserts instrumentation callbacks before code generation.
+
+    ```bash
+    # Compile a standalone file
+    leafc samples/hello_world.rs
+
+    # Or instrument a Cargo project
+    RUSTC=leafc cargo build
+    ```
+
+    The output is a regular ELF binary, but every branch, assignment, and function call that touches a symbolic value now contains an extra call into the runtime library (`libleafrt.so`).
+  </Step>
+
+  <Step title="Build and attach a runtime backend">
+    A runtime backend is a shared library (`libleafrt.so`) that implements the callback interface Leaf expects. Build the backend you need, then make it discoverable to the instrumented binary via `LD_LIBRARY_PATH`.
+
+    ```bash
+    # Build the symbolic execution backend
+    cargo build -p runtime_symex
+
+    # Link the shared library into a discoverable location
+    mkdir -p target/debug/runtime_symex
+    ln -sf "$(find target/debug -maxdepth 1 -name 'libleafrt*.so' | head -n 1)" \
+        target/debug/runtime_symex/libleafrt.so
+
+    export LD_LIBRARY_PATH="$PWD/target/debug/runtime_symex:$LD_LIBRARY_PATH"
+    ```
+
+    Leaf ships three backends: `runtime_symex` for full symbolic execution, `runtime_cf_tracer` for control-flow tracing, and `runtime_noop` as a compilation smoke-test. See [Backends](/concepts/backends) for a detailed comparison.
+  </Step>
+
+  <Step title="Run the instrumented binary">
+    Execute the binary as you normally would. The backend receives every instrumentation callback in real time, tracks symbolic constraints, and writes analysis results to the `leaf_out/` directory.
+
+    ```bash
+    export LEAF_LOG="info"
+    ./hello_world
+    ```
+
+    With the symbolic execution backend active, you will see log lines like the following:
+
+    ```log
+    INFO leafrt::backends::basic::sym_vars  Added a new symbolic variable: <Var1: u8> = 10u8
+    INFO leafrt::trace::log                 Notified about constraint {!(<(<Var1: u8>, 5u8))} at step Def(0:5)[2]
+    INFO leafrt::outgen                     Found a solution:
+    {
+        "1": 0u8,
+    }
+    ```
+
+    The backend has observed that `x = 10` does not satisfy `x < 5`, queried Z3 for a value that would flip the branch, and produced `0u8` as a diverging input.
+  </Step>
+</Steps>
+
+## Component Roles at a Glance
+
+<CardGroup cols={2}>
+  <Card title="leafc" icon="hammer">
+    A drop-in `rustc` wrapper that hooks into Rust's MIR pipeline. It adds instrumentation callbacks at every branch, assignment, and function call before code generation, producing a standard binary that dynamically links against the backend.
+  </Card>
+  <Card title="Runtime backend" icon="plug">
+    A shared library (`libleafrt.so`) loaded at startup by the instrumented binary. It receives callbacks from the instrumentation layer, tracks symbolic state, and optionally queries an SMT solver to produce analysis outputs.
+  </Card>
+  <Card title="Symbolic variables" icon="variable">
+    Program values annotated with `mark_symbolic()`. They act as the unknowns in the constraint system. Leaf tracks every operation on them and records branch conditions as logical formulas over these unknowns.
+  </Card>
+  <Card title="Output artifacts" icon="file-export">
+    Results written to the `leaf_out/` directory. Depending on the backend, these include binary diverging-input files (one byte per `u8` symbolic variable), JSONL execution traces, or structured constraint logs.
+  </Card>
+</CardGroup>
+
+## What Happens Inside the Binary
+
+When the instrumented binary reaches a branch that depends on a symbolic variable, the following sequence occurs entirely at runtime — no source recompilation is needed:
+
+1. The instrumentation callback fires, passing the branch operands and condition to the backend.
+2. The backend records the constraint (e.g., `x < 5`) and its observed truth value.
+3. If configured to solve, the backend passes the negated constraint to Z3 and requests a concrete assignment that would flip the branch.
+4. Z3 returns a solution (e.g., `x = 0`), which the backend writes to `leaf_out/` as a diverging input.
+
+This loop runs within a single execution of your program. Each branch with a symbolic operand potentially yields one diverging input, and each diverging input represents an alternative execution path you can explore by re-running the binary with that input.
+
+<Tip>
+  Enable detailed runtime logging by setting `LEAF_LOG=debug` before running your binary. This surfaces every symbolic variable registration, constraint observation, and solver query — useful when diagnosing why a particular path is not being explored.
+</Tip>
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="Symbolic Execution" icon="code-branch" href="/concepts/symbolic-execution">
+    Learn what concolic execution is and how it differs from pure symbolic execution or fuzzing.
+  </Card>
+  <Card title="Instrumentation" icon="wrench" href="/concepts/instrumentation">
+    Understand how leafc modifies your program at the MIR level and how to configure instrumentation scope.
+  </Card>
+  <Card title="Backends" icon="server" href="/concepts/backends">
+    Compare the three available runtime backends and choose the right one for your analysis goal.
+  </Card>
+</CardGroup>

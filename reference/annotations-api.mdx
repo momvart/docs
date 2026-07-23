@@ -1,0 +1,208 @@
+---
+title: "leaf::annotations API Reference for Leaf Instrumentation"
+sidebarTitle: "Annotations API"
+description: "Complete reference for the leaf::annotations module — mark values as symbolic, push and pop execution tags, and control which paths Leaf analyzes."
+---
+
+The `leaf::annotations` module is your primary interface for telling Leaf which values to treat as symbolic inputs and how to annotate execution paths. You import it inside `#[cfg(leafc)]` blocks so your code compiles and runs normally without the Leaf toolchain, and activates symbolic tracking only when compiled with `leafc`.
+
+## Importing the module
+
+Always guard annotation code with `#[cfg(leafc)]` so your program stays buildable with the standard Rust compiler:
+
+```rust
+fn analyze_function(input: u8) {
+    #[cfg(leafc)]
+    let input = {
+        use leaf::annotations::*;
+        input.mark_symbolic()
+    };
+
+    // The rest of your function runs normally in both modes.
+}
+```
+
+The `use leaf::annotations::*` glob import brings `Symbolizable`, `push_tag`, and `pop_tag` into scope. The `leaf` crate is part of the Leaf sysroot and is available automatically when compiling with `leafc`.
+
+---
+
+## `Symbolizable` trait
+
+The `Symbolizable` trait is implemented for every primitive numeric type. Calling `mark_symbolic()` on a value registers it as a symbolic variable with the active runtime backend. In a plain (non-instrumented) execution the call is a no-op — it returns `self` unchanged without any overhead.
+
+```rust
+pub trait Symbolizable: Sized {
+    fn mark_symbolic(self) -> Self;
+    fn symbolize(&self);
+}
+```
+
+### Supported types
+
+`Symbolizable` is implemented for all of the following types:
+
+| Category | Types |
+|---|---|
+| Boolean | `bool` |
+| Character | `char` |
+| Signed integers | `i8`, `i16`, `i32`, `i64`, `i128`, `isize` |
+| Unsigned integers | `u8`, `u16`, `u32`, `u64`, `u128`, `usize` |
+| Floating point | `f32`, `f64` |
+
+### Methods
+
+<ParamField path="mark_symbolic" type="fn(self) -> Self">
+  Marks a value as a fresh symbolic variable and returns it unchanged. Use this
+  method in your instrumented code. The returned value has the same concrete
+  representation but is tracked symbolically by the backend.
+
+  Internally, `mark_symbolic` calls `symbolize` and then returns `self`. This
+  means the concrete value is preserved and execution continues normally — the
+  backend observes the registration event and begins tracking the variable.
+</ParamField>
+
+<ParamField path="symbolize" type="fn(&self)">
+  The underlying implementation called by `mark_symbolic`. Notifies the runtime
+  backend of a new symbolic variable by passing the concrete value and type
+  metadata. You do not need to call this method directly; use `mark_symbolic`
+  instead.
+</ParamField>
+
+### Example
+
+```rust
+fn check_byte(raw: u8) -> bool {
+    #[cfg(leafc)]
+    let raw = {
+        use leaf::annotations::*;
+        raw.mark_symbolic()
+    };
+
+    raw > 100
+}
+```
+
+When compiled with `leafc` and run with the `runtime_symex` backend, Leaf registers `raw` as a symbolic variable named `<Var1: u8>`, then tracks the constraint `raw > 100` through the branch. Without `leafc`, the call to `mark_symbolic()` does not exist in the binary at all.
+
+<Note>
+  The concrete value you pass to `mark_symbolic()` becomes the **seed** for the
+  first execution. The backend uses it as the initial concrete assignment for
+  the symbolic variable and then searches for inputs that diverge from that
+  execution path.
+</Note>
+
+---
+
+## `push_tag`
+
+```rust
+pub fn push_tag(tag: &'static str)
+```
+
+Pushes a string tag onto the current execution's tag stack. Tags annotate the constraints collected while the tag is active. You can later reference these tags in `leaf_config.toml` to filter which constraints are eligible for diverging input generation.
+
+<ParamField path="tag" type="&'static str" required>
+  A static string identifier for this tag. Choose names that are meaningful
+  for your filtering rules, such as `"no_diverge"` or `"init_only"`.
+</ParamField>
+
+### Example
+
+```rust
+#[cfg(leafc)]
+{
+    use leaf::annotations::*;
+    push_tag("no_diverge");
+}
+
+// Constraints collected here are tagged "no_diverge".
+let _ = run_initialization_code(x);
+
+#[cfg(leafc)]
+{
+    use leaf::annotations::*;
+    pop_tag();
+}
+```
+
+To exclude tagged constraints from diverging input generation, add a filter to your `leaf_config.toml`:
+
+```toml
+[[exe_trace.inspectors.filters]]
+type = "tags"
+exclude_any_of = ["no_diverge"]
+```
+
+---
+
+## `pop_tag`
+
+```rust
+pub fn pop_tag()
+```
+
+Pops the most recently pushed tag from the tag stack. Tags follow a stack discipline — `pop_tag` always removes the last tag added by `push_tag`. Call `pop_tag` once for every `push_tag` call to keep the stack balanced.
+
+### Full tag usage example
+
+```rust
+fn process(value: u32) {
+    #[cfg(leafc)]
+    let value = {
+        use leaf::annotations::*;
+        value.mark_symbolic()
+    };
+
+    #[cfg(leafc)]
+    { use leaf::annotations::*; push_tag("setup"); }
+
+    // Constraints in this region are tagged "setup".
+    let validated = validate_range(value);
+
+    #[cfg(leafc)]
+    { use leaf::annotations::*; pop_tag(); }
+
+    // Constraints here are untagged.
+    compute(validated);
+}
+```
+
+<Warning>
+  Mismatched `push_tag` / `pop_tag` calls corrupt the tag stack for the rest
+  of the execution. Always pair each push with a pop, even on early-return
+  paths.
+</Warning>
+
+---
+
+## Built-in tags
+
+The `leaf::annotations::tags` module re-exports any built-in tag constants provided by the Leaf runtime. Import them the same way:
+
+```rust
+#[cfg(leafc)]
+{
+    use leaf::annotations::tags::*;
+    // Use any built-in tag constants here.
+}
+```
+
+---
+
+## Behavioural summary
+
+<CardGroup cols={2}>
+  <Card title="Concrete execution" icon="play">
+    `mark_symbolic()` returns `self` unchanged. `push_tag` and `pop_tag` are
+    no-ops. Zero overhead in production builds compiled without `leafc`.
+  </Card>
+  <Card title="Instrumented execution" icon="magnifying-glass">
+    `mark_symbolic()` registers the value with the backend. Tags are recorded
+    alongside constraints so you can filter results in `leaf_config.toml`.
+  </Card>
+</CardGroup>
+
+<Tip>
+  Wrap every annotation call in `#[cfg(leafc)]` to prevent compilation errors
+  when building your project with the standard `rustc` compiler.
+</Tip>

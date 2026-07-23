@@ -1,0 +1,135 @@
+---
+title: "Analyze a Rust Program End-to-End Using Leaf's Engine"
+sidebarTitle: "Analyzing Programs"
+description: "Step-by-step guide to annotating, compiling, and running a Rust program under Leaf's concolic execution engine to generate diverging inputs."
+---
+
+Leaf analyses work by instrumenting your Rust program at the MIR level, linking it against a runtime backend, and then running the resulting binary. The runtime observes every symbolic operation at run time, records path constraints, and queries a solver for concrete inputs that would cause execution to take a different branch. This guide walks you through every step of that workflow, from annotating your source code to reading the output files.
+
+## Prerequisites
+
+Before you begin, make sure you have installed `leafc` and built the symbolic execution runtime backend:
+
+```console
+# Install the compiler frontend
+$ cargo install --path ./compiler
+
+# Build the symbolic execution runtime backend
+$ cargo build -p runtime_symex
+```
+
+## Step 1 — Annotate Your Program
+
+Leaf needs to know which values to treat as symbolic (unknown) inputs. You mark them using the `mark_symbolic()` method from the `leaf::annotations` module. Because this annotation only compiles when `leafc` is the active compiler, wrap it in a `#[cfg(leafc)]` block so your program also compiles with standard `rustc`.
+
+The `hello_world` sample included in the repository demonstrates the pattern:
+
+```rust
+fn main() {
+    let x: u8 = core::hint::black_box(10);
+    #[cfg(leafc)]
+    let x: u8 = {
+        use leaf::annotations::*;
+        x.mark_symbolic()
+    };
+
+    if x < 5 {
+        println!("Hello, world!");
+    }
+}
+```
+
+`core::hint::black_box(10)` provides a concrete starting value of `10` when running without Leaf. The `#[cfg(leafc)]` block then re-binds `x` as a symbolic variable when running under `leafc`, so the runtime can reason about all possible `u8` values at that point. The `Symbolizable` trait is implemented for all primitive types — `bool`, `char`, integer types, and floating-point types.
+
+<Note>
+The `#[cfg(leafc)]` guard is critical. Without it, `leaf::annotations` is unavailable when building with standard `rustc`, which will cause a compilation error.
+</Note>
+
+## Step 2 — Compile with leafc
+
+Compile your annotated program by passing it to `leafc` exactly as you would pass it to `rustc`:
+
+```console
+$ leafc samples/hello_world.rs
+```
+
+This produces an instrumented binary named `hello_world` in the current directory. The binary contains callbacks to the Leaf runtime for every symbolic operation identified at the MIR level.
+
+## Step 3 — Make the Runtime Discoverable
+
+The instrumented binary dynamically links to the Leaf runtime shared library (`libleafrt.so`). You need to create a stable symlink pointing to the shared library file built in Step 0, then add it to `LD_LIBRARY_PATH`:
+
+```console
+$ mkdir -p target/debug/runtime_symex
+$ ln -sf "$(find target/debug -maxdepth 1 -name 'libleafrt*.so' | head -n 1)" \
+    target/debug/runtime_symex/libleafrt.so
+$ export LD_LIBRARY_PATH="$PWD/target/debug/runtime_symex:$LD_LIBRARY_PATH"
+```
+
+The `find` command locates the versioned `.so` file produced by `cargo build`, and the symlink gives the dynamic linker a stable name to resolve at load time. If `LD_LIBRARY_PATH` is not set correctly, the binary will fail to start with a missing shared library error.
+
+<Warning>
+You must re-run the symlink and export commands whenever you rebuild the runtime or open a new shell session, since `LD_LIBRARY_PATH` is not persisted across shells.
+</Warning>
+
+## Step 4 — Run the Instrumented Binary
+
+Enable runtime logging so you can observe what the backend is doing, then run your binary:
+
+```console
+$ export LEAF_LOG="info"
+$ ./hello_world
+```
+
+`LEAF_LOG` accepts the standard `tracing` log level names: `error`, `warn`, `info`, `debug`, and `trace`. Start with `info` — it shows symbolic variable registration, constraint observations, and solver results without overwhelming you with internal detail.
+
+## Step 5 — Read the Output
+
+For the `hello_world` example you should see output similar to the following:
+
+```log
+2024-12-10 00:40:55  INFO leafrt Initializing runtime library
+2024-12-10 00:40:55  INFO leafrt::pri::basic::instance Initializing basic backend
+2024-12-10 00:40:55  INFO leafrt::backends::basic::outgen Setting up binary output writing to directory: output
+2024-12-10 00:40:55  INFO leafrt::pri::basic::instance Basic backend initialized
+2024-12-10 00:40:55  INFO leafrt::backends::basic::sym_vars Added a new symbolic variable: <Var1: u8> = 10u8
+2024-12-10 00:40:55  INFO leafrt::trace::log Notified about constraint {!(<(<Var1: u8>, 5u8))} at step Def(0:5)[2]
+2024-12-10 00:40:55  INFO leafrt::outgen Found a solution:
+{
+    "1": 0u8,
+}
+```
+
+Here is what each line tells you:
+
+<Steps>
+  <Step title="Runtime initialisation">
+    The first four lines confirm that `libleafrt.so` was loaded and the basic symbolic execution backend started up successfully.
+  </Step>
+  <Step title="Symbolic variable registered">
+    `Added a new symbolic variable: <Var1: u8> = 10u8` — the runtime recorded that `x` is symbolic. The concrete seed value from `black_box(10)` is `10`.
+  </Step>
+  <Step title="Constraint observed">
+    `Notified about constraint {!(<(<Var1: u8>, 5u8))}` — the `if x < 5` branch was *not* taken with the seed input (because `10 ≥ 5`), so the runtime recorded the negated constraint `!(x < 5)`.
+  </Step>
+  <Step title="Diverging input found">
+    `Found a solution: {"1": 0u8}` — the solver found that setting `Var1` (i.e., `x`) to `0` would satisfy `x < 5`, causing execution to diverge into the `println!` branch. This is the diverging input.
+  </Step>
+</Steps>
+
+### Output files
+
+The runtime writes diverging inputs as binary files into the `leaf_out/` directory. Each file contains one byte per symbolic variable, ordered by when each variable was marked symbolic. In this example, `leaf_out/` will contain a single file whose first byte is `0x00`, corresponding to `x = 0`.
+
+<Tip>
+You can feed these output files directly back into your program as standard input if all your symbolic variables are derived from `stdin`. See the [Diverging Inputs guide](/guides/diverging-inputs) for more detail on that workflow.
+</Tip>
+
+<CardGroup cols={2}>
+  <Card title="Cargo Integration" icon="box" href="/guides/cargo-integration">
+    Learn how to use leafc inside a Cargo workspace instead of compiling single files.
+  </Card>
+  <Card title="Diverging Inputs" icon="code-branch" href="/guides/diverging-inputs">
+    Understand how to interpret and iterate on the output files Leaf produces.
+  </Card>
+</CardGroup>

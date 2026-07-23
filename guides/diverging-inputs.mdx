@@ -1,0 +1,138 @@
+---
+title: "Generate Diverging Inputs with Leaf's Concolic Engine"
+sidebarTitle: "Diverging Inputs"
+description: "How Leaf records path constraints, queries Z3 for satisfying assignments, and writes diverging inputs you can use to explore new program branches."
+---
+
+Every time you run a Leaf-instrumented program, the runtime traces the path your input took through the code and identifies every conditional branch it encountered. For each branch where the current input did *not* satisfy the branch condition, the runtime asks a solver whether any alternative concrete value would have satisfied it — causing execution to diverge at that point. These alternative values are called **diverging inputs**. This guide explains how Leaf generates them, where to find them, and how to run a fully automated concolic testing loop.
+
+<Note>
+The orchestrator tool `leafo_onetime` mentioned in older documentation has been moved out of the main project repository. The primary workflow for diverging input generation is through the `runtime_symex` backend directly, as described below. The `leaff_pure_conc` tool wraps this workflow into a convenient loop.
+</Note>
+
+## What Diverging Inputs Are
+
+Consider the `hello_world` example, where `x` starts at the concrete seed value `10`:
+
+```rust
+fn main() {
+    let x: u8 = core::hint::black_box(10);
+    #[cfg(leafc)]
+    let x: u8 = {
+        use leaf::annotations::*;
+        x.mark_symbolic()
+    };
+
+    if x < 5 {
+        println!("Hello, world!");
+    }
+}
+```
+
+With `x = 10`, the `if x < 5` branch is not taken. The runtime records the negated path constraint `!(x < 5)` — meaning the execution *did* travel down the "false" side. It then asks Z3: "is there a value of `x` that satisfies `x < 5`?" Z3 answers `x = 0`. That value `0` is a diverging input: feeding it back to the program would cause execution to diverge into the `println!` branch.
+
+## How Leaf Generates Them
+
+<Steps>
+  <Step title="Symbolic variable registration">
+    When your code calls `x.mark_symbolic()`, the runtime registers `x` as a symbolic variable (`Var1: u8`) with its current concrete value as the seed.
+  </Step>
+  <Step title="Constraint recording">
+    At every conditional branch, the runtime records either the branch condition or its negation, depending on which path the concrete seed value took.
+  </Step>
+  <Step title="Solver query">
+    Whenever a new constraint is observed, Leaf queries the Z3 solver with the current set of path constraints, negating the most recent one to find an input that would take the opposite branch.
+  </Step>
+  <Step title="Output writing">
+    If Z3 finds a satisfying assignment, the runtime writes a binary output file containing the concrete values for each symbolic variable.
+  </Step>
+</Steps>
+
+## Default Configuration
+
+Leaf ships with a `leaf_config.toml` that enables diverging input generation out of the box. The relevant section is:
+
+```toml
+[[outputs]]
+type = "file"
+directory = "leaf_out"
+format = "binary"
+
+[[exe_trace.inspectors]]
+type = "diverging_input"
+check_optimistic = true
+```
+
+The `diverging_input` inspector is active by default. You do not need to modify the configuration to start generating diverging inputs — just run the instrumented binary.
+
+`check_optimistic = true` means the solver also checks whether the current constraint set (without negation) has a solution, which can surface additional reachable inputs. Additional inspector options, such as branch-depth distance filters and tag-based exclusions, are available in `leaf_config.toml` as commented-out examples.
+
+The solver configuration uses Z3 with a 10-second timeout per query:
+
+```toml
+[solver]
+type = "z3"
+[solver.global_params]
+timeout = 10000
+```
+
+## Reading Output Files
+
+All diverging inputs are written as raw binary files into the `leaf_out/` directory. Each file encodes one complete input assignment:
+
+- **One byte per symbolic variable**, ordered by the sequence in which variables were marked symbolic during execution.
+- The file is suitable for direct use as standard input if your program reads its symbolic data from `stdin`.
+
+For example, if your program marks `stdin` as symbolic in one byte chunks, the file `leaf_out/diverging_0.bin` contains the bytes that would steer execution down a different branch. You can pipe it directly:
+
+```bash
+$ ./my_program < leaf_out/diverging_0.bin
+```
+
+Other output files written to `leaf_out/` include:
+
+| File pattern | Contents |
+|---|---|
+| `*.bin` | Diverging input binary files |
+| `control_flow_*.jsonl` | Execution control flow trace |
+| `constraints_*.jsonl` | Recorded path constraints |
+| `preconditions_*.jsonl` | Pre-condition constraints |
+
+## Pure Concolic Testing Loop
+
+Running a single execution generates inputs for one execution path. To explore more branches, you feed each diverging input back to the program to discover further constraints and generate even more diverging inputs. This is *pure concolic testing*.
+
+The `leaff_pure_conc` utility automates this loop:
+
+**1. Install the tool from the Leaf repository:**
+
+```console
+leaf$ cargo install --path ./integration/libafl/fuzzers/pure_concolic
+```
+
+**2. Build your program with `leafc`:**
+
+```console
+$ leafc samples/hello_world.rs
+```
+
+**3. Run the concolic loop:**
+
+```console
+$ leaff_pure_conc --conc-program ./hello_world
+```
+
+The tool runs your binary, collects diverging inputs, re-runs the binary with each one, collects further diverging inputs from those executions, and repeats. **The loop terminates when no new distinct inputs are found.** If your program has loops or recursive structures, the loop may run for a very long time — pass `--help` to see options for bounding execution.
+
+<Tip>
+`leaff_pure_conc` also captures any crashes encountered during the concolic loop and reports the inputs that triggered them, making it useful for finding panic paths in addition to branch coverage.
+</Tip>
+
+<CardGroup cols={2}>
+  <Card title="Analyzing a Program" icon="play" href="/guides/analyzing-a-program">
+    See the full annotation and compilation workflow before generating inputs.
+  </Card>
+  <Card title="Hybrid Fuzzing" icon="shuffle" href="/guides/hybrid-fuzzing">
+    Combine diverging input generation with coverage-guided fuzzing using LibAFL.
+  </Card>
+</CardGroup>

@@ -1,0 +1,95 @@
+---
+title: "Use leafc with Cargo to Instrument Your Rust Project"
+sidebarTitle: "Cargo Integration"
+description: "How to override the Rust compiler with leafc in Cargo builds to instrument your target crate while leaving all of its dependencies untouched."
+---
+
+Because `leafc` is a drop-in wrapper around `rustc`, you can use it anywhere Cargo invokes the compiler — no special build scripts or plugins required. You simply tell Cargo to use `leafc` instead of `rustc`, and your crate is instrumented exactly as if you had called `leafc` directly. This guide covers the different ways to configure that override, how instrumentation is scoped to your crate only, and practical tips for keeping your instrumented build separate from your regular development build.
+
+## Overriding the Compiler via the Environment
+
+Cargo respects the `RUSTC` environment variable as the compiler binary to invoke. Set it to `leafc` before running any `cargo build` command:
+
+```bash
+$ export RUSTC=leafc
+$ cargo build
+```
+
+You can also set it inline for a single command without affecting your shell session:
+
+```bash
+$ RUSTC=leafc cargo build
+```
+
+Both forms work identically. Use the inline form when you want to instrument a one-off build without changing your shell's default compiler.
+
+## Overriding the Compiler via .cargo/config.toml
+
+If you want `leafc` to be the default compiler for a particular project without needing to set an environment variable every time, add the following to your project's `.cargo/config.toml`:
+
+```toml
+[build]
+rustc = "leafc"
+```
+
+<Warning>
+Committing this file to source control will force every contributor and CI job to have `leafc` installed. Consider using the environment variable approach in shared projects and reserving `.cargo/config.toml` for personal or analysis-only branches.
+</Warning>
+
+## How leafc Behaves in a Cargo Build
+
+When Cargo builds a workspace or a crate with dependencies, it invokes the compiler once for each crate in the dependency graph. `leafc` is aware of this context: **it instruments only your target crate and skips instrumentation for its dependencies**.
+
+This means that crates like `serde`, `tokio`, or any other third-party dependency are compiled normally, without Leaf's MIR-level callbacks inserted. Only the code that belongs to the crate you are analysing receives instrumentation. This keeps build times reasonable and avoids unexpected interactions between the runtime and complex library internals.
+
+<Note>
+The `#[cfg(leafc)]` configuration flag is set automatically by `leafc` for the crate it is instrumenting. You do not need to pass `--cfg leafc` manually; any `#[cfg(leafc)]` blocks in your source code will be compiled in as long as `leafc` is the active compiler for that crate.
+</Note>
+
+## Building a Specific Binary
+
+If your workspace contains multiple binaries, you can target just the one you want to analyse:
+
+```bash
+$ RUSTC=leafc cargo build --bin my_binary
+```
+
+This builds `my_binary` and its in-workspace dependencies with `leafc`, leaving other binaries untouched.
+
+## Using a Separate Target Directory
+
+Cargo's incremental compilation cache is keyed on compiler flags and metadata. Switching between `rustc` and `leafc` will cause Cargo to consider cached artefacts invalid, forcing a full rebuild of your crate every time you switch. To avoid this, build your instrumented binary into a dedicated target directory:
+
+```bash
+$ RUSTC=leafc cargo build --target-dir ./target/leaf
+```
+
+This keeps the instrumented build artefacts in `./target/leaf/` and your ordinary development build artefacts in `./target/` completely separate. Neither build invalidates the other's cache, so switching between a regular `cargo build` and a Leaf-instrumented build costs no extra compilation time.
+
+<Tip>
+A common convention is to use `./target/leaf` for instrumented builds and leave `./target` as the standard Cargo output directory. You can set a shell alias like `alias leafbuild='RUSTC=leafc cargo build --target-dir ./target/leaf'` to save typing.
+</Tip>
+
+## Full Example
+
+The following sequence instruments a binary called `my_analyzer`, runs it with the symbolic execution backend, and writes output files without disturbing an existing regular build:
+
+```bash
+# Build the instrumented binary into a separate directory
+$ RUSTC=leafc cargo build --bin my_analyzer --target-dir ./target/leaf
+
+# Set up the runtime shared library (see the Analyzing a Program guide)
+$ export LD_LIBRARY_PATH="$PWD/target/debug/runtime_symex:$LD_LIBRARY_PATH"
+
+# Run with logging enabled
+$ LEAF_LOG=info ./target/leaf/debug/my_analyzer
+```
+
+<CardGroup cols={2}>
+  <Card title="Analyzing a Program" icon="play" href="/guides/analyzing-a-program">
+    Full walkthrough of annotating, compiling, and running a program under Leaf.
+  </Card>
+  <Card title="Diverging Inputs" icon="code-branch" href="/guides/diverging-inputs">
+    What to do with the output files Leaf writes during analysis.
+  </Card>
+</CardGroup>

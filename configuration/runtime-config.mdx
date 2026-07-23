@@ -1,0 +1,428 @@
+---
+title: "Runtime Configuration Reference for Leaf (leaf_config.toml)"
+sidebarTitle: "Runtime Config"
+description: "Configure leaf_config.toml: external call handling, symbolic place strategies, output destinations, execution trace inspectors, and Z3 solver settings."
+---
+
+Leaf reads `leaf_config.toml` from the current working directory when your instrumented binary starts. If the file is not found there, Leaf walks up the directory tree and uses the first match it finds — so a single config file placed at a project root applies to all sub-crate runs without any extra setup.
+
+## Minimal example
+
+The following snippet is a practical starting point. Copy it into your project directory and adjust the sections you care about:
+
+```toml
+[call]
+external_call = "concretization"
+
+[sym_place]
+read  = "stamping"
+write = "stamping"
+
+[[outputs]]
+type      = "file"
+directory = "leaf_out"
+format    = "binary"
+
+[solver]
+type = "z3"
+[solver.global_params]
+timeout = 10000
+```
+
+## Full annotated example
+
+```toml
+[call]
+# panic | concretization | over_approximation | optimistic_concretization
+external_call = "concretization"
+
+[sym_place]
+# proj_expression | concretization | stamping
+read  = "stamping"
+write = "stamping"
+
+[[outputs]]
+type      = "file"
+directory = "leaf_out"
+format    = "binary"
+
+[exe_trace]
+dump_interval = 5   # seconds between periodic snapshots
+
+[exe_trace.control_flow_dump]
+type      = "file"
+directory = "leaf_out"
+format    = "jsonl"
+
+[exe_trace.constraints_dump]
+type      = "file"
+directory = "leaf_out"
+format    = "jsonl"
+
+[exe_trace.preconditions_dump]
+type      = "file"
+directory = "leaf_out"
+format    = "jsonl"
+
+[[exe_trace.inspectors]]
+type  = "sanity_checker"
+level = "panic"
+[exe_trace.inspectors.output]
+type      = "file"
+directory = "leaf_out"
+format    = "txt"
+prefix    = "unsat_trace_"
+
+[[exe_trace.constraint_filters]]
+type = "sanity_checker"
+[exe_trace.constraint_filters.output]
+type      = "file"
+directory = "leaf_out"
+format    = "txt"
+prefix    = "unsat_constraint_"
+
+[[exe_trace.inspectors]]
+type             = "diverging_input"
+check_optimistic = true
+
+[[exe_trace.inspectors]]
+type = "branch_coverage"
+[exe_trace.inspectors.output]
+type      = "file"
+directory = "leaf_out"
+format    = "json"
+
+[solver]
+type = "z3"
+[solver.global_params]
+timeout = 10000
+# "solver.smtlib2_log" = "queries.smt2"   # write Z3 SMT queries to a file
+```
+
+---
+
+## `[call]` — external call handling
+
+When Leaf encounters a call to a function that was not instrumented (an external or opaque call), this setting controls what the runtime does with any symbolic arguments.
+
+<ParamField path="external_call" type="string" default="concretization">
+  Strategy for handling external calls that receive symbolic arguments.
+
+  | Value | Behaviour |
+  |-------|-----------|
+  | `concretization` | Replace each symbolic argument with its current concrete value before the call. The path constraint for that value is **not** recorded (under-approximation). |
+  | `optimistic_concretization` | Concretize as above, but additionally assert that the symbolic variable equals the concrete value that was used. This constrains future solving to stay on the same branch. |
+  | `over_approximation` | Model the return value as a fresh unconstrained symbolic variable (over-approximation). May increase the number of diverging inputs found. |
+  | `panic` | Abort execution immediately when an external call with symbolic arguments is encountered. Useful to pinpoint instrumentation gaps during development. |
+</ParamField>
+
+```toml
+[call]
+external_call = "optimistic_concretization"
+```
+
+---
+
+## `[sym_place]` — symbolic memory access
+
+A *symbolic place* is a memory location whose address is itself a symbolic expression (for example, indexing a slice with a symbolic integer). These options control how Leaf resolves such accesses.
+
+<ParamField path="read" type="string" default="stamping">
+  Strategy used when **reading** from a symbolically-addressed location.
+</ParamField>
+
+<ParamField path="write" type="string" default="stamping">
+  Strategy used when **writing** to a symbolically-addressed location.
+</ParamField>
+
+The available strategies are:
+
+| Value | Behaviour |
+|-------|-----------|
+| `stamping` | Use the current concrete address and add a constraint asserting that the symbolic address equals it. Future solver queries are restricted to paths that visit this address. *(default)* |
+| `concretization` | Use the current concrete address, but add **no** constraint. Cheaper than stamping, but loses information about the symbolic address. |
+| `proj_expression` | Build an expression that ranges over all possible addresses. More precise but significantly more expensive; use only when you need full symbolic sensitivity for pointer-valued expressions. |
+
+```toml
+[sym_place]
+read  = "stamping"
+write = "concretization"  # cheaper for writes if precision is not required
+```
+
+---
+
+## `[[outputs]]` — generated input files
+
+Each `[[outputs]]` entry defines one output destination for the diverging inputs that Leaf generates. You can have multiple entries to write to different formats simultaneously.
+
+<ParamField path="type" type="string" required>
+  Output backend. Currently `"file"` is the only supported type.
+</ParamField>
+
+<ParamField path="directory" type="string" default="current directory">
+  Path to the directory where output files are written. The directory is created automatically if it does not exist.
+</ParamField>
+
+<ParamField path="format" type="string" default="json">
+  Serialization format for generated inputs.
+
+  | Value | File extension | Notes |
+  |-------|----------------|-------|
+  | `binary` | `.bin` | Compact binary encoding — preferred for fuzzer integration. |
+  | `json` | `.json` | Human-readable JSON. |
+  | `jsonl` | `.jsonl` | JSON Lines (one JSON object per line) — preferred for streaming large outputs. |
+  | `text` / `txt` | `.txt` | Plain text. |
+</ParamField>
+
+<ParamField path="prefix" type="string">
+  Prefix prepended to each output file name. When only a single file is generated, this becomes the full file name (before the extension).
+</ParamField>
+
+```toml
+# Write binary inputs for a fuzzer harness
+[[outputs]]
+type      = "file"
+directory = "fuzz/corpus"
+format    = "binary"
+
+# Also write human-readable copies
+[[outputs]]
+type      = "file"
+directory = "leaf_out/readable"
+format    = "jsonl"
+prefix    = "input_"
+```
+
+---
+
+## `[exe_trace]` — execution trace management
+
+The execution trace records the symbolic constraints and control-flow decisions observed during a run. This section controls when and where that data is persisted.
+
+<ParamField path="dump_interval" type="integer">
+  Time in seconds between periodic dumps of in-progress trace data. Set this for long-running programs that might be interrupted before they terminate normally. If omitted, data is only written at the end of execution.
+</ParamField>
+
+### Dump sub-sections
+
+Each dump sub-section accepts the same `OutputConfig` fields as `[[outputs]]` (`type`, `directory`, `format`, `prefix`).
+
+<ParamField path="[exe_trace.control_flow_dump]" type="OutputConfig">
+  Persist the control-flow trace (branch decisions) to a file. Use `format = "jsonl"` for streaming writes.
+</ParamField>
+
+<ParamField path="[exe_trace.constraints_dump]" type="OutputConfig">
+  Persist the full constraint set to a file. Useful for offline solver experiments.
+</ParamField>
+
+<ParamField path="[exe_trace.preconditions_dump]" type="OutputConfig">
+  Persist the pre-conditions (path conditions that must hold before a divergence point) to a file.
+</ParamField>
+
+```toml
+[exe_trace]
+dump_interval = 5
+
+[exe_trace.control_flow_dump]
+type      = "file"
+directory = "leaf_out"
+format    = "jsonl"
+
+[exe_trace.constraints_dump]
+type      = "file"
+directory = "leaf_out"
+format    = "jsonl"
+```
+
+---
+
+## `[[exe_trace.inspectors]]` — trace inspectors
+
+Inspectors observe the execution trace as it is built and produce secondary outputs such as diagnostics, diverging inputs, or coverage data. Add one `[[exe_trace.inspectors]]` table for each inspector you want active.
+
+### `sanity_checker`
+
+Validates that the accumulated constraints are satisfiable at each step. Use this during development to catch instrumentation bugs early.
+
+<ParamField path="level" type="string" default="warn">
+  What to do when an unsatisfiable constraint set is detected.
+
+  | Value | Behaviour |
+  |-------|-----------|
+  | `warn` | Print a warning to stderr and continue. |
+  | `panic` | Abort the process immediately. Useful as a hard failure gate in CI. |
+</ParamField>
+
+<ParamField path="output" type="OutputConfig">
+  Optional: write the unsatisfiable trace to a file for later inspection. Set `format = "txt"` and `prefix = "unsat_trace_"` to get one file per violation.
+</ParamField>
+
+```toml
+[[exe_trace.inspectors]]
+type  = "sanity_checker"
+level = "panic"
+[exe_trace.inspectors.output]
+type      = "file"
+directory = "leaf_out"
+format    = "txt"
+prefix    = "unsat_trace_"
+```
+
+### `diverging_input`
+
+The core inspector. At every symbolic branch it queries the solver for an alternative input that would flip the branch, collecting *diverging inputs* that explore new paths.
+
+<ParamField path="check_optimistic" type="boolean" default="true">
+  When `true`, also attempt to generate inputs from optimistically-concretized constraints (those added by `optimistic_concretization` call handling). Disable this if solver calls are too expensive.
+</ParamField>
+
+<ParamField path="filters" type="array">
+  Optional list of filters that gate which divergence candidates are solved. See below for available filter types.
+</ParamField>
+
+```toml
+[[exe_trace.inspectors]]
+type             = "diverging_input"
+check_optimistic = true
+```
+
+#### Divergence filters
+
+Filters let you skip solver queries that are unlikely to be useful, reducing overhead on long runs.
+
+<Accordion title="tags filter — exclude branches by annotation">
+
+  Excludes divergence queries at branches that carry a specific tag. Tags are attached in source code with Leaf's attribute macros.
+
+  ```toml
+  [[exe_trace.inspectors]]
+  type = "diverging_input"
+
+  [[exe_trace.inspectors.filters]]
+  type           = "tags"
+  exclude_any_of = ["test_no_diverge", "skip_solving"]
+  ```
+
+</Accordion>
+
+<Accordion title="branch_depth_distance filter — skip shallow branches">
+
+  Skips branches that are closer (in terms of call depth) to the current deepest unexplored frontier than a configurable threshold. This focuses solver effort on deep, hard-to-reach paths.
+
+  <ParamField path="distance_threshold_factor" type="float" default="2.0">
+    Branches whose depth-distance ratio is below this factor are skipped. Raise the value to be more selective; lower it to solve more branches.
+  </ParamField>
+
+  <ParamField path="persistence" type="OutputConfig">
+    Optional: persist the depth-distance state between runs so progress is not lost if execution is interrupted.
+  </ParamField>
+
+  ```toml
+  [[exe_trace.inspectors]]
+  type = "diverging_input"
+
+  [[exe_trace.inspectors.filters]]
+  type                     = "branch_depth_distance"
+  distance_threshold_factor = 1.5
+  [exe_trace.inspectors.filters.persistence]
+  type      = "file"
+  directory = "leaf_out"
+  format    = "json"
+  ```
+
+  <Note>
+    The `branch_depth_distance` filter requires the `branch_coverage` inspector to also be active so that coverage data is available.
+  </Note>
+
+</Accordion>
+
+### `branch_coverage`
+
+Records which branches were taken during the run. Its output can be used by external tools or the `branch_depth_distance` filter.
+
+<ParamField path="output" type="OutputConfig">
+  Where to write the coverage report. Use `format = "json"` for a structured summary.
+</ParamField>
+
+```toml
+[[exe_trace.inspectors]]
+type = "branch_coverage"
+[exe_trace.inspectors.output]
+type      = "file"
+directory = "leaf_out"
+format    = "json"
+```
+
+---
+
+## `[[exe_trace.constraint_filters]]` — constraint filters
+
+Constraint filters run before a constraint is committed to the trace, letting you drop or modify constraints before they reach the solver. Each `[[exe_trace.constraint_filters]]` entry is one filter in the pipeline.
+
+### `sanity_checker`
+
+Detects and optionally discards constraints that would immediately render the trace unsatisfiable.
+
+<ParamField path="output" type="OutputConfig">
+  Optional: write every rejected constraint to a file for debugging.
+</ParamField>
+
+```toml
+[[exe_trace.constraint_filters]]
+type = "sanity_checker"
+[exe_trace.constraint_filters.output]
+type      = "file"
+directory = "leaf_out"
+format    = "txt"
+prefix    = "unsat_constraint_"
+```
+
+---
+
+## `[solver]` — SMT solver settings
+
+<ParamField path="type" type="string" default="z3">
+  Solver backend. `"z3"` is the only supported solver at present.
+</ParamField>
+
+### `[solver.global_params]` — Z3 parameters
+
+Any key–value pair under `[solver.global_params]` is passed directly to Z3 as a global parameter. The most commonly used parameter is `timeout`:
+
+<ParamField path="timeout" type="integer">
+  Per-query timeout in **milliseconds**. Queries that exceed this limit return `unknown`. A value of `10000` (10 seconds) is a reasonable starting point for most programs.
+</ParamField>
+
+To log every SMT query Z3 receives, set the `solver.smtlib2_log` key to the path of the output file:
+
+```toml
+[solver]
+type = "z3"
+[solver.global_params]
+timeout = 10000
+"solver.smtlib2_log" = "queries.smt2"
+```
+
+<Note>
+  `solver.smtlib2_log` is a Z3 global parameter (note the dotted key), not a Leaf key, so it must be quoted in TOML to prevent the dot from being interpreted as table nesting.
+</Note>
+
+---
+
+## Providing configuration inline
+
+If you cannot place a file on disk (for example, in a CI pipeline or a fuzzer driver), you can pass the entire config as an environment variable:
+
+```bash
+export LEAF_CONFIG_STR='[call]
+external_call = "panic"'
+export LEAF_CONFIG_STR_FMT="toml"
+
+./my_instrumented_binary
+```
+
+`LEAF_CONFIG_STR_FMT` accepts any of: `toml`, `json`, `json5`, `yaml`, `ron`, `ini`. The inline config is merged **on top of** any file found on disk, so it can selectively override individual keys.
+
+<Tip>
+  Use `LEAF_CONFIG_STR` together with a base `leaf_config.toml` to keep shared settings in the file and override only the values that differ between runs (for example, the output directory in parallel fuzzing campaigns).
+</Tip>

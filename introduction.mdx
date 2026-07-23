@@ -1,0 +1,58 @@
+---
+title: "Introduction to Leaf: Concolic Execution for Rust"
+sidebarTitle: "Introduction"
+description: "Learn how Leaf instruments Rust at the MIR level to enable symbolic execution, diverging input generation, and hybrid fuzzing through pluggable backends."
+---
+
+Testing a Rust program thoroughly means exploring paths the happy-path tests never reach. Leaf gives you a systematic way to do that: it instruments your program at the MIR level at compile time, then routes every runtime event — memory reads, branches, comparisons — to an analysis backend that can reason about them symbolically. The result is a framework that finds inputs that trigger new paths, integrates with fuzz-testing pipelines, and lets you build custom analyses without touching the Rust compiler internals yourself.
+
+## How Leaf works
+
+Leaf's workflow has three stages that stay cleanly separated from each other:
+
+**Compile time — instrumentation.** You invoke `leafc` instead of `rustc`. `leafc` is a thin wrapper around the Rust compiler that inserts instrumentation callbacks into the program's Mid-level Intermediate Representation (MIR) before code generation. The output is a standard binary that carries those callbacks; your original source code is otherwise unchanged.
+
+**Runtime — backend dispatch.** When the instrumented binary runs, it dynamically loads a shared library called `libleafrt.so`. Every instrumented operation in the program calls into this library, which forwards the event to whichever backend is active. Backends are normal Rust crates compiled to a shared library, so you can swap them, compose them, or write your own without recompiling the target program.
+
+**Analysis — results.** The active backend interprets the stream of runtime events. The symbolic execution backend, for example, tracks which values are symbolic, collects path constraints, and calls a solver (Z3) to find concrete inputs that satisfy alternative branches. Other backends can trace control flow, discard events cheaply, or feed data to a fuzzer.
+
+## Key use cases
+
+- **Diverging input generation.** Mark a value as symbolic, run the program, and let the symbolic execution backend solve for inputs that take the opposite branch. Leaf surfaces these as concrete byte values you can feed straight back into your tests.
+- **Hybrid fuzzing.** Leaf integrates with LibAFL so the symbolic engine and a coverage-guided fuzzer cooperate: the fuzzer generates broad coverage cheaply, and Leaf solves for inputs that cross branch constraints the fuzzer cannot flip randomly.
+- **Symbolic execution research.** The pluggable backend model means you can prototype new analysis strategies — taint tracking, value-set analysis, custom constraint domains — against real Rust programs at MIR fidelity without forking the compiler.
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="MIR instrumentation" icon="code" href="/concepts/overview">
+    Callbacks are injected at the MIR level, capturing precise value and control-flow information before optimisation discards it.
+  </Card>
+  <Card title="Pluggable backends" icon="plug" href="/concepts/overview">
+    Ship backends as Rust crates compiled to a shared library. Swap them at runtime without recompiling the target.
+  </Card>
+  <Card title="Z3 solver integration" icon="function" href="/concepts/overview">
+    The symbolic execution backend uses Z3 to solve path constraints and produce concrete counterexample inputs.
+  </Card>
+  <Card title="LibAFL / libfuzzer integration" icon="shield-halved" href="/concepts/overview">
+    First-class support for hybrid fuzzing via a LibAFL integration crate that combines coverage-guided fuzzing with concolic analysis.
+  </Card>
+</CardGroup>
+
+## Project layout
+
+| Directory | Purpose |
+|-----------|---------|
+| `compiler/` | The `leafc` driver and MIR instrumentation pipeline |
+| `runtime/lib/` | Shared abstraction library for implementing backends |
+| `runtime/backends/` | Concrete backend implementations (symex, cf_tracer, noop, …) |
+| `common/` | Shared types and utilities used across the project |
+| `samples/` | Ready-to-run example programs, including `hello_world.rs` |
+
+## Ready to try it?
+
+The fastest way to see Leaf in action is to run the `hello_world` sample end-to-end with the symbolic execution backend.
+
+<Card title="Quickstart — run your first analysis" icon="bolt" href="/quickstart">
+  Install leafc, build the symex backend, and watch Leaf solve for a diverging input in under ten minutes.
+</Card>

@@ -1,0 +1,90 @@
+{
+  "projectType": "cli-tool",
+  "projectName": "Leaf",
+  "projectDescription": "Leaf is a concolic execution framework for Rust that instruments programs at the MIR level via a custom compiler wrapper (`leafc`) and pluggable runtime backends to enable dynamic symbolic analysis, diverging input generation, and hybrid fuzzing.",
+  "theme": "aspen",
+  "primaryColor": "#3B6E3C",
+  "lightColor": "#5AA65C",
+  "darkColor": "#2A4E2B",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/overview",
+              "concepts/symbolic-execution",
+              "concepts/instrumentation",
+              "concepts/backends"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/analyzing-a-program",
+              "guides/cargo-integration",
+              "guides/diverging-inputs",
+              "guides/hybrid-fuzzing"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/runtime-config",
+              "configuration/compiler-config",
+              "configuration/environment-variables"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/annotations-api",
+              "reference/runtime-backends",
+              "reference/output-formats",
+              "reference/troubleshooting"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "MIR-level instrumentation via the leafc compiler wrapper",
+    "Pluggable runtime backends (symbolic execution, control-flow tracer, no-op)",
+    "Automatic diverging input generation using Z3 SMT solver",
+    "Hybrid fuzzing integration with LibAFL and libfuzzer-sys",
+    "mark_symbolic() annotation API for marking variables as symbolic",
+    "Cargo integration via RUSTC=leafc override",
+    "Tag-based annotation scoping with push_tag/pop_tag",
+    "Configurable external call handling (concretization, over-approximation)",
+    "TOML, JSON, YAML, RON configuration file support",
+    "Binary and JSONL output formats for analysis results"
+  ],
+  "publicApiSurface": [
+    "leafc (compiler wrapper CLI)",
+    "leaf::annotations::Symbolizable::mark_symbolic()",
+    "leaf::annotations::push_tag(tag: &'static str)",
+    "leaf::annotations::pop_tag()",
+    "LEAF_LOG environment variable",
+    "LEAF_LOG_STYLE environment variable",
+    "LEAFC_LOG environment variable",
+    "LEAFC_FORCE_NOOP environment variable",
+    "leaf_config.toml (runtime configuration file)",
+    "leafc_config.toml (compiler configuration file)",
+    "runtime_symex backend (cargo build -p runtime_symex)",
+    "runtime_cf_tracer backend (cargo build -p runtime_cf_tracer)",
+    "runtime_noop backend (cargo build -p runtime_noop)",
+    "hybrid_fuzz_target! macro (libafl_leaf integration)",
+    "RUSTC=leafc cargo build (Cargo integration)"
+  ]
+}

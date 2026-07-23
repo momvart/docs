@@ -1,47 +1,150 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Quickstart: Run Your First Leaf Symbolic Analysis"
+sidebarTitle: "Quickstart"
+description: "Install leafc, build the symbolic execution backend, and run the hello_world sample to see Leaf find a diverging input in under ten minutes."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
+This guide walks you through the shortest path to a working Leaf analysis. You will clone the repository, install the `leafc` compiler wrapper, build the symbolic execution backend, instrument the `hello_world` sample, and watch Leaf solve for a concrete input that takes the program down the branch your original value never reached.
 
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
+<Note>
+  Leaf relies on a specific nightly Rust toolchain (`nightly-2026-07-01`). The `rust-toolchain.toml` file at the repository root tells Cargo which toolchain to use automatically, so you do not need to set it manually as long as you have `rustup` installed.
+</Note>
 
 ## Prerequisites
 
-Before you begin, you must have:
+Before you begin, make sure you have the following available on your system:
 
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
+- **rustup** with the ability to install nightly toolchains
+- **Python** (used by helper scripts in the repository)
+- **A C toolchain and linker** (e.g., `gcc` or `clang` with `ld`)
 
-## Get started
+See the [Installation guide](/installation) for full details on setting up each dependency.
+
+## Step 1 — Clone the repository and install leafc
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
-
+  <Step title="Clone and enter the workspace">
     ```bash
-    npm install your-package
+    git clone https://github.com/sfu-rsl/leaf.git
+    cd leaf
     ```
   </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+  <Step title="Install the leafc compiler wrapper">
+    Cargo installs `leafc` into your `~/.cargo/bin` directory, which puts it on your `PATH`.
 
     ```bash
-    your-cli init
+    cargo install --path ./compiler
     ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+
+    Verify the installation completed successfully:
 
     ```bash
-    your-cli start
+    leafc --version
     ```
   </Step>
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## Step 2 — Build the symbolic execution backend
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+The symbolic execution backend is compiled as a shared library (`libleafrt.so`) that the instrumented binary loads at startup.
+
+```bash
+cargo build -p runtime_symex
+```
+
+<Tip>
+  Prefer a faster feedback loop? Pass `--release` to build an optimised shared library. Omitting it (as above) produces a debug build, which is fine for this walkthrough.
 </Tip>
+
+## Step 3 — Make the runtime library discoverable
+
+The instrumented binary looks for `libleafrt.so` at a path derived from `LD_LIBRARY_PATH`. Create the expected directory structure and symlink the library into it.
+
+```bash
+mkdir -p target/debug/runtime_symex
+ln -sf "$(find target/debug -maxdepth 1 -name 'libleafrt*.so' | head -n 1)" \
+    target/debug/runtime_symex/libleafrt.so
+export LD_LIBRARY_PATH="$PWD/target/debug/runtime_symex:$LD_LIBRARY_PATH"
+```
+
+<Note>
+  The `find` command above locates the compiled shared library regardless of its exact name. If you switch to a different backend later, repeat this step pointing at that backend's output directory.
+</Note>
+
+## Step 4 — Examine the hello_world sample
+
+The sample program lives at `samples/hello_world.rs`. It marks a variable as symbolic using Leaf's annotation API, then branches on it:
+
+```rust
+fn main() {
+    let x: u8 = core::hint::black_box(10);
+    #[cfg(leafc)]
+    let x: u8 = {
+        use leaf::annotations::*;
+        x.mark_symbolic()
+    };
+
+    if x < 5 {
+        println!("Hello, world!");
+    }
+}
+```
+
+The `#[cfg(leafc)]` block is compiled in only when you use `leafc`, so the same source file runs as an ordinary binary under `rustc` without any Leaf dependency. `mark_symbolic()` tells the runtime backend to treat `x` as a symbolic variable seeded with the concrete value `10`.
+
+## Step 5 — Compile with leafc
+
+Use `leafc` in place of `rustc` to instrument the sample:
+
+```bash
+leafc samples/hello_world.rs
+```
+
+This produces an instrumented `./hello_world` binary in the current directory.
+
+## Step 6 — Run the instrumented binary
+
+Enable the runtime logging, then execute the binary:
+
+```bash
+export LEAF_LOG="info"
+./hello_world
+```
+
+## Expected output
+
+With the symbolic execution backend active, you should see output similar to the following:
+
+```log
+2024-12-10 00:40:55  INFO leafrt Initializing runtime library
+2024-12-10 00:40:55  INFO leafrt::pri::basic::instance Initializing basic backend
+2024-12-10 00:40:55  INFO leafrt::backends::basic::outgen Setting up binary output writing to directory: output
+2024-12-10 00:40:55  INFO leafrt::pri::basic::instance Basic backend initialized
+2024-12-10 00:40:55  INFO leafrt::backends::basic::sym_vars Added a new symbolic variable: <Var1: u8> = 10u8
+2024-12-10 00:40:55  INFO leafrt::trace::log Notified about constraint {!(<(<Var1: u8>, 5u8))} at step Def(0:5)[2]
+2024-12-10 00:40:55  INFO leafrt::outgen Found a solution:
+{
+    "1": 0u8,
+}
+```
+
+Here is what each key line means:
+
+| Log line | What it tells you |
+|----------|-------------------|
+| `Added a new symbolic variable: <Var1: u8> = 10u8` | The backend registered `x` as symbolic, seeded with the concrete value `10`. |
+| `Notified about constraint {!(<(<Var1: u8>, 5u8))}` | The program evaluated `x < 5`; the constraint records that the branch was *not* taken (i.e., `x ≥ 5`). |
+| `Found a solution: {"1": 0u8}` | Z3 solved the *negated* constraint (`x < 5`) and produced `0` as a concrete diverging input — a value that makes the program print `"Hello, world!"`. |
+
+The backend also writes the solution to the `output/` directory as a binary file you can feed directly into a subsequent run or fuzzer corpus.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Full installation guide" icon="screwdriver-wrench" href="/installation">
+    Set up all toolchain components, additional backends, and the devcontainer option.
+  </Card>
+  <Card title="Analyzing a program" icon="magnifying-glass" href="/guides/analyzing-a-program">
+    Instrument your own Rust code, choose the right backend, and interpret the results.
+  </Card>
+</CardGroup>

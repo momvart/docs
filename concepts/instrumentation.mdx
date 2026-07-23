@@ -1,0 +1,140 @@
+---
+title: "MIR Instrumentation: How leafc Transforms Your Program"
+sidebarTitle: "Instrumentation"
+description: "Learn how leafc hooks into Rust's MIR pipeline to insert runtime callbacks, and how to configure instrumentation scope with leafc_config.toml."
+---
+
+Leaf instruments your program at the *compiler level*, not by modifying source code or post-processing a binary. `leafc` is a drop-in replacement for `rustc` that intercepts Rust's compilation pipeline at the MIR stage — before code generation — and inserts instrumentation callbacks wherever the program interacts with symbolic variables. The result is an ordinary binary that behaves identically to the uninstrumented version, except that it carries extra function calls into the runtime backend at every relevant operation.
+
+## What MIR Is
+
+MIR stands for **Mid-level Intermediate Representation**. It is a simplified, typed control-flow graph that the Rust compiler produces after type-checking and borrow-checking, but before generating machine code. MIR makes compiler transformations tractable: all Rust syntax has been desugared, all implicit operations (e.g., operator overloading, method dispatch) have been made explicit, and control flow is reduced to basic blocks with explicit terminators.
+
+Leaf instruments at the MIR level for two reasons. First, MIR is abstract enough to be independent of the target architecture, so a single instrumentation pass covers all platforms `rustc` supports. Second, MIR exposes every assignment, comparison, and branch as a distinct, named operation — which makes it straightforward to insert a callback at each one without relying on fragile source-level transformations.
+
+## How leafc Works
+
+`leafc` behaves exactly like `rustc` from Cargo's perspective. It accepts the same arguments, produces the same output artifacts, and respects the same environment variables. Internally, it registers a custom MIR transformation pass that runs after the standard optimization pipeline:
+
+1. **Parse and type-check** — handled entirely by the standard Rust compiler front end.
+2. **Lower to MIR** — the compiler produces the MIR for each function.
+3. **Instrument MIR** — `leafc` walks the MIR and inserts calls to the Leaf runtime interface (`leafrt`) at branches, assignments, and function calls that may involve symbolic values.
+4. **Code generation** — the modified MIR is handed back to `rustc` for LLVM code generation as usual.
+
+The instrumented binary dynamically links against `libleafrt.so` (the runtime backend). The backend is loaded at startup via `LD_LIBRARY_PATH`, so you can swap backends without recompiling your program.
+
+## Annotating Symbolic Variables
+
+Mark the inputs you want Leaf to track by calling `mark_symbolic()`. Because this call requires the `leaf` annotations crate (which is only available when compiling with `leafc`), wrap it in a `#[cfg(leafc)]` block. This conditional-compilation guard ensures that your program continues to compile and run correctly with the standard `rustc` toolchain.
+
+```rust
+fn main() {
+    let x: u8 = core::hint::black_box(10);
+    #[cfg(leafc)]
+    let x: u8 = {
+        use leaf::annotations::*;
+        x.mark_symbolic()
+    };
+
+    if x < 5 {
+        println!("Hello, world!");
+    }
+}
+```
+
+When compiled with `leafc`, the block executes `mark_symbolic()`, which registers `x` with the runtime backend as a symbolic variable. From that point on, every operation that depends on `x` — including the `x < 5` comparison — triggers instrumentation callbacks. When compiled with standard `rustc`, the `#[cfg(leafc)]` block is omitted entirely and the program runs as normal with `x = 10`.
+
+<Note>
+  `core::hint::black_box()` prevents the Rust optimizer from constant-folding the value of `x` before `leafc` can instrument it. For variables that come from actual runtime sources (file input, network, command-line arguments), this is unnecessary — use it only when the initial value is a literal.
+</Note>
+
+## Using leafc with Cargo
+
+For multi-crate projects, tell Cargo to use `leafc` instead of `rustc` by setting the `RUSTC` environment variable:
+
+```bash
+RUSTC=leafc cargo build
+```
+
+`leafc` recognizes when it is being invoked to compile a dependency versus your target crate and applies instrumentation selectively. Dependencies are generally compiled without full symbolic instrumentation to keep overhead manageable.
+
+You can also set this persistently in a `.cargo/config.toml` in your project:
+
+```toml
+[build]
+rustc = "leafc"
+```
+
+## Configuring Instrumentation Scope
+
+`leafc` reads a configuration file named `leafc_config.toml` from the current directory (or from the path specified by the `LEAFC_CONFIG` environment variable). This file controls which crates and operations are instrumented, letting you exclude noisy or irrelevant code from the analysis.
+
+```toml
+# leafc_config.toml
+
+[instrumentation]
+# Exclude specific crates from instrumentation entirely.
+exclude_crates = ["serde", "regex"]
+
+# Limit instrumentation to only the crates listed here.
+# Omit this key to instrument all non-excluded crates.
+# include_crates = ["my_crate"]
+```
+
+<Warning>
+  Excluding a crate from instrumentation means that symbolic values flowing through that crate will not generate constraints. If your symbolic inputs pass through a serialization layer or a hashing function you have excluded, Leaf will not be able to reason about the conditions those libraries impose.
+</Warning>
+
+## The cfg(leafc) Pattern in Practice
+
+The `#[cfg(leafc)]` attribute is the recommended way to write Leaf-aware code that degrades gracefully. You can use it anywhere a `cfg` attribute is valid: on statements, expressions, function definitions, modules, and `impl` blocks.
+
+Common patterns include:
+
+**Conditional symbolic marking at a function boundary:**
+
+```rust
+fn parse_input(raw: &[u8]) -> MyStruct {
+    #[cfg(leafc)]
+    let raw = {
+        use leaf::annotations::*;
+        raw.mark_symbolic()
+    };
+    // ... rest of parsing
+}
+```
+
+**Skipping expensive setup when running under Leaf:**
+
+```rust
+#[cfg(not(leafc))]
+setup_real_database_connection();
+
+#[cfg(leafc)]
+setup_mock_for_analysis();
+```
+
+**Feature-gating entire test harnesses:**
+
+```rust
+#[cfg(leafc)]
+mod symbolic_tests {
+    use leaf::annotations::*;
+    // Symbolic test cases here
+}
+```
+
+<Tip>
+  Think of `#[cfg(leafc)]` as analogous to `#[cfg(test)]`. It lets you maintain a single codebase that serves both production use and symbolic analysis without any runtime overhead in the uninstrumented build.
+</Tip>
+
+## What Gets Instrumented
+
+After compilation with `leafc`, the binary contains callbacks at the following MIR constructs when they operate on or produce symbolic values:
+
+- **Assignments** (`let x = expr`) — the backend is notified of the new value and its symbolic expression.
+- **Binary and unary operations** — arithmetic, bitwise, and comparison operations propagate symbolic expressions.
+- **Branch terminators** (`if`, `match`, loop conditions) — the backend receives the branch condition as a constraint.
+- **Function calls** — arguments that carry symbolic values are reported; return values can propagate symbolic state.
+
+Operations on purely concrete values (those with no symbolic dependency) do not generate callbacks, keeping the runtime overhead proportional to the reach of your symbolic variables.

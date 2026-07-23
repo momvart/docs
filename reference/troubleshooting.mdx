@@ -1,0 +1,278 @@
+---
+title: "Troubleshooting Common Leaf Setup and Runtime Issues"
+sidebarTitle: "Troubleshooting"
+description: "Solutions for the most common Leaf problems — missing libraries, wrong toolchains, empty output, solver timeouts, and instrumentation crashes."
+---
+
+This page collects the most frequent problems users encounter when setting up and running Leaf analyses, along with concrete steps to resolve each one. If your issue is not listed here, enable debug logging first — most problems become self-evident once you see what the runtime and compiler are reporting.
+
+---
+
+## Runtime and library issues
+
+<Accordion title='"cannot find -lleafrt" or shared library not found at runtime'>
+
+**Symptom:** The linker fails with `cannot find -lleafrt`, or your instrumented binary starts and immediately exits with an error like `error while loading shared libraries: libleafrt.so: cannot open shared object file`.
+
+**Cause:** The `libleafrt.so` symlink either does not exist or `LD_LIBRARY_PATH` does not include the directory containing it.
+
+**Solution:**
+
+Run the following commands from the root of the Leaf repository, replacing `runtime_symex` with whichever backend you are using:
+
+```bash
+# 1. Build the backend.
+cargo build -p runtime_symex
+
+# 2. Create a directory to hold the named symlink.
+mkdir -p target/debug/runtime_symex
+
+# 3. Find the built .so and create the symlink.
+ln -sf "$(find target/debug -maxdepth 1 -name 'libleafrt*.so' | head -n 1)" \
+    target/debug/runtime_symex/libleafrt.so
+
+# 4. Export the path so the dynamic linker can find it.
+export LD_LIBRARY_PATH="$PWD/target/debug/runtime_symex:$LD_LIBRARY_PATH"
+```
+
+Verify the symlink resolves correctly:
+
+```bash
+ls -la target/debug/runtime_symex/libleafrt.so
+```
+
+The output should point to a real `.so` file in `target/debug/`.
+
+</Accordion>
+
+---
+
+## Installation and toolchain issues
+
+<Accordion title="leafc not found after installation">
+
+**Symptom:** Running `leafc` returns `command not found` even after `cargo install --path ./compiler` completes successfully.
+
+**Cause:** Cargo installs binaries to `~/.cargo/bin/`, but that directory is not in your `PATH`.
+
+**Solution:**
+
+Add `~/.cargo/bin` to your shell's `PATH` permanently by appending the following line to your shell profile (e.g., `~/.bashrc`, `~/.zshrc`, or `~/.profile`):
+
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"
+```
+
+Then reload your shell or run:
+
+```bash
+source ~/.bashrc   # or source ~/.zshrc
+```
+
+Confirm `leafc` is now discoverable:
+
+```bash
+which leafc
+leafc --version
+```
+
+</Accordion>
+
+<Accordion title="Compilation errors about nightly features or wrong toolchain">
+
+**Symptom:** Compilation fails with errors such as `error[E0554]: #![feature] may not be used on the stable release channel` or messages about an unexpected toolchain version.
+
+**Cause:** Leaf requires a specific nightly Rust toolchain. If you compile outside the Leaf repository root, the `rust-toolchain.toml` file that pins the correct toolchain is not picked up automatically.
+
+**Solution:**
+
+Run your `leafc` and `cargo` commands from inside the Leaf workspace directory, where `rust-toolchain.toml` is present. Rustup reads this file automatically and activates the correct toolchain.
+
+If you need to compile from a different directory, set the toolchain override explicitly:
+
+```bash
+rustup override set nightly-2026-07-01
+```
+
+Replace `nightly-2026-07-01` with the exact toolchain version specified in `rust-toolchain.toml` at the root of the Leaf repository.
+
+To check the currently active toolchain:
+
+```bash
+rustup show active-toolchain
+```
+
+</Accordion>
+
+---
+
+## Output and analysis issues
+
+<Accordion title="No output in leaf_out/ after running the instrumented binary">
+
+**Symptom:** The binary runs to completion without errors, but `leaf_out/` is empty or does not exist.
+
+**Cause:** There are two common reasons:
+
+1. No values were marked symbolic — `mark_symbolic()` was never called (possibly because the `#[cfg(leafc)]` guard is missing or the wrong condition was used).
+2. The `runtime_noop` backend is active — it intentionally produces no output.
+
+**Solution:**
+
+First, check that your program actually calls `mark_symbolic()` under `#[cfg(leafc)]`:
+
+```rust
+fn main() {
+    let x: u8 = 42;
+
+    // This block must be present and correctly guarded.
+    #[cfg(leafc)]
+    let x: u8 = {
+        use leaf::annotations::*;
+        x.mark_symbolic()
+    };
+
+    // ...
+}
+```
+
+Second, enable runtime logging to see what the backend observes:
+
+```bash
+export LEAF_LOG=info
+./your_program
+```
+
+With `runtime_symex` active and a symbolic variable registered, you should see lines similar to:
+
+```
+INFO leafrt::backends::basic::sym_vars  Added a new symbolic variable: <Var1: u8> = 42u8
+```
+
+If you see nothing about symbolic variables, the annotation is not being executed. If you see the variable registered but no output files, confirm that the `[[outputs]]` block is present in `leaf_config.toml` and that the backend you are running supports binary output (see the [Runtime Backends reference](/reference/runtime-backends)).
+
+</Accordion>
+
+<Accordion title="Z3 solver timeout — diverging inputs not found">
+
+**Symptom:** The binary runs and registers symbolic variables, but no `.bin` diverging input files appear in `leaf_out/`. Runtime logs may include messages like `timeout` or `unknown` from the solver.
+
+**Cause:** The default solver timeout is 10,000 ms (10 seconds). Deeply nested path conditions or complex arithmetic constraints can exceed this limit before Z3 finds a satisfying assignment.
+
+**Solution:**
+
+Increase the timeout in `leaf_config.toml`. Add or update the `[solver.global_params]` section:
+
+```toml
+[solver]
+type = "z3"
+
+[solver.global_params]
+# Increase from the default 10000 ms to 60 seconds.
+timeout = 60000
+```
+
+If increasing the timeout does not help, you can also:
+
+- Reduce the scope of symbolic analysis by marking fewer variables as symbolic.
+- Switch to `runtime_symex_no_implicit` to disable implicit flow tracking and reduce constraint complexity.
+- Enable the SMT-LIB2 log to inspect the queries Z3 is receiving:
+  ```toml
+  [solver.global_params]
+  timeout = 60000
+  "solver.smtlib2_log" = "queries.smt2"
+  ```
+  Then run `z3 queries.smt2` to replay the queries offline and measure how long each takes.
+
+</Accordion>
+
+<Accordion title="Program crashes or panics in instrumented mode but not in normal mode">
+
+**Symptom:** Your program runs correctly with `rustc` but crashes, panics, or produces wrong results when compiled with `leafc` and run with a backend.
+
+**Cause:** When the instrumented binary calls an external function (one that was not compiled with `leafc`), the backend cannot track symbolic values through that call. The default behaviour is `concretization` — Leaf snapshots the current symbolic state and treats any values returned from the external call as fully concrete. In some cases this causes the analysis to proceed with an inconsistent state.
+
+**Solution:**
+
+Open `leaf_config.toml` and review the `[call]` section:
+
+```toml
+[call]
+# Options: panic, concretization, over_approximation, optimistic_concretization
+external_call = "concretization"
+```
+
+Try changing `external_call` to `"optimistic_concretization"` for more permissive handling, or to `"over_approximation"` if you want the backend to assume the worst case for symbolic values crossing the boundary.
+
+If a specific function is causing problems and you do not need to analyse it, exclude it from instrumentation using `[[instr_rules.exclude]]` in your compiler configuration:
+
+```toml
+[[instr_rules.exclude]]
+# Exclude a specific function from MIR instrumentation.
+fn_name = "problematic_function_name"
+```
+
+Enable debug logging to identify which external call is triggering the issue:
+
+```bash
+export LEAF_LOG=debug
+./your_program 2>&1 | grep -i "external\|call\|panic"
+```
+
+</Accordion>
+
+---
+
+## Debugging and logging
+
+<Accordion title="How to enable debug logging">
+
+Leaf exposes two independent log streams: one for the runtime backend and one for the `leafc` compiler itself. Both use the `tracing` infrastructure and respect log level filters.
+
+**Runtime logging (the instrumented binary)**
+
+Set `LEAF_LOG` to the desired level before running your binary:
+
+```bash
+export LEAF_LOG=debug    # verbose — includes every MIR callback
+export LEAF_LOG=info     # recommended starting point
+export LEAF_LOG=warn     # only warnings and errors
+./your_program
+```
+
+**Compiler logging (leafc)**
+
+Set `LEAFC_LOG` to control what `leafc` prints during instrumentation:
+
+```bash
+export LEAFC_LOG=debug
+leafc your_program.rs
+```
+
+**Z3 query logging**
+
+To see the exact SMT formulas being sent to the solver, add the following to `leaf_config.toml`:
+
+```toml
+[solver.global_params]
+"solver.smtlib2_log" = "queries.smt2"
+```
+
+This writes every query to `queries.smt2` in the working directory. You can then replay individual queries with:
+
+```bash
+z3 queries.smt2
+```
+
+**Putting it all together**
+
+For a full-picture debug run:
+
+```bash
+export LEAF_LOG=debug
+export LEAFC_LOG=debug
+leafc your_program.rs
+./your_program 2>&1 | tee debug.log
+```
+
+</Accordion>

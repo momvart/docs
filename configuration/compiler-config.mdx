@@ -1,0 +1,326 @@
+---
+title: "leafc Compiler Configuration Reference (leafc_config.toml)"
+sidebarTitle: "Compiler Config"
+description: "Configure leafc: MIR codegen mode, instrumentation exclusion rules, sysroot handling, and compiler pass toggles for Leaf symbolic analysis builds."
+---
+
+`leafc` reads `leafc_config.toml` from the current working directory (or the nearest ancestor directory) before it invokes the underlying Rust compiler. This file lets you control which code gets instrumented, how the runtime shim is linked, and which compiler passes run — without touching your Cargo manifest or source code.
+
+## Minimal example
+
+Most projects work with the defaults. The only section you are likely to add early is an exclusion rule for a crate that causes problems at instrumentation time:
+
+```toml
+codegen_all_mir  = true
+marker_cfg_name  = "leafc"
+override_sysroot = true
+
+[[instr_rules.exclude]]
+entity = "dyn_def"
+all = [
+    { crate = { name = "problematic_crate" } },
+]
+```
+
+## Full annotated example
+
+```toml
+# Encode MIR for every function, not just reachable ones.
+# Required when using the Leaf-built sysroot.
+codegen_all_mir = true
+
+# The cfg flag injected into every crate compiled by leafc.
+# Use #[cfg(leafc)] in your code to write Leaf-specific branches.
+marker_cfg_name = "leafc"
+
+# Automatically find and switch to a Leaf-compatible sysroot.
+override_sysroot = true
+
+# Tell leafc where to find the runtime shim library (leafrtsh).
+[runtime_shim]
+[runtime_shim.location.external]
+crate_name  = "leaf"
+search_path = "sysroot"
+
+# Exclude the recursive aho-corasick implementation from instrumentation.
+# See: https://github.com/BurntSushi/aho-corasick/issues/149
+[[instr_rules.exclude]]
+entity = "dyn_def"
+all = [
+    { crate = { name = "aho_corasick" } },
+    { def_path = '<&.* as .*Automaton>::\w+' },
+]
+
+# Keep LLVMFuzzerInitialize visible to the linker during fuzzer builds.
+[passes.internalization.rules]
+exclude = ["LLVMFuzzerInitialize"]
+
+# Disable the metadata-info export pass (not needed for normal analysis).
+[passes.md_info]
+enabled = false
+```
+
+---
+
+## Top-level options
+
+<ParamField path="codegen_all_mir" type="boolean" default="true">
+  When `true`, leafc forces the Rust compiler to encode MIR for **all** functions in every crate it compiles, not just those reachable from `main`. This is required for the full-program symbolic analysis mode because Leaf instruments dependency crates by reading their stored MIR at link time.
+
+  Enabling this option also forces a single codegen unit and disables LTO to ensure reliable MIR availability.
+</ParamField>
+
+<ParamField path="marker_cfg_name" type="string" default="leafc">
+  The name of the `cfg` flag that leafc injects into every crate it compiles. You can use this flag in your source code to conditionally compile Leaf-specific code:
+
+  ```rust
+  #[cfg(leafc)]
+  fn symbolic_setup() { /* ... */ }
+  ```
+
+  Set to an empty string `""` to disable the flag entirely.
+</ParamField>
+
+<ParamField path="override_sysroot" type="boolean" default="true">
+  When `true` and `codegen_all_mir` is also `true`, leafc will search for a Leaf-compatible sysroot (one whose standard library was compiled with full MIR). If it does not find one, it builds one automatically. Set to `false` only if you are managing the sysroot yourself.
+</ParamField>
+
+---
+
+## `[runtime_shim]` — linking the runtime
+
+The runtime shim (`leafrtsh`) is the stub library that instrumented code calls into at runtime. This section tells leafc where to find it.
+
+```toml
+[runtime_shim]
+[runtime_shim.location.external]
+crate_name  = "leaf"   # the Rust crate that exports the shim
+search_path = "sysroot" # where to look: "sysroot" | "compiler" | "crate_deps" | exact path
+```
+
+<ParamField path="search_path" type="string" default="sysroot">
+  | Value | Meaning |
+  |-------|---------|
+  | `sysroot` | Expect the shim inside the Leaf-built sysroot. Use this with `codegen_all_mir = true`. |
+  | `crate_deps` | Treat the shim as a normal Cargo dependency resolved in the usual search paths. |
+  | `compiler` | Look for the shim next to the `leafc` binary (useful for standalone distributions). |
+  | `"<path>"` | Absolute or relative path to the `.rlib` file. |
+</ParamField>
+
+---
+
+## `[[instr_rules.exclude]]` — instrumentation exclusion rules
+
+Each `[[instr_rules.exclude]]` table tells leafc to skip instrumenting a specific class of MIR entities. Rules are matched with a conjunction (`all`) or disjunction (`any`) of predicates.
+
+<Note>
+  `instr_rules` is a shorthand alias. You can also write `[[passes.instrumentation.rules.exclude]]` for the same effect — but do not mix both styles in a single config file.
+</Note>
+
+### `entity` types
+
+<ParamField path="entity" type="string" required>
+  The MIR entity kind this rule applies to. Supported values:
+
+  | Entity | What it controls |
+  |--------|-----------------|
+  | `dyn_def` | A monomorphised definition (function or method). This is the most common exclusion target. |
+  | `body` | The entire MIR body of a function. |
+  | `place_info` | Instrumentation of memory-place metadata. Accepts a `kind` sub-key (`address`, `type`, `structure`). |
+  | `operand_kind` | Instrumentation of operands (`move`, `copy`, `constant`). |
+  | `const_type` | Instrumentation of constants by type (`int`, `bool`, `float`, etc.). |
+  | `assignment` | Instrumentation of assignment statements by rvalue kind. |
+  | `assignment_info` | Assignment metadata (e.g., `wrap_unsafe_binder`). |
+  | `storage_lifetime` | `StorageLive` / `StorageDead` statements. |
+  | `call_flow` | Aspects of function call instrumentation (`call_addr`, `call_input`, `func_data`, `func_addr`). |
+  | `drop` | Drop terminator instrumentation (`call_control`, `call_input`). |
+  | `switch` | Switch (match) terminator instrumentation (`data`). |
+</ParamField>
+
+### Predicates
+
+Each predicate inside `all` or `any` is a table with one of the following shapes:
+
+<ParamField path="crate.name" type="string">
+  Match definitions whose defining crate has this exact name.
+
+  ```toml
+  { crate = { name = "regex" } }
+  ```
+</ParamField>
+
+<ParamField path="crate.is_external" type="boolean">
+  Match all definitions from external (non-workspace) crates.
+
+  ```toml
+  { crate = { is_external = true } }
+  ```
+</ParamField>
+
+<ParamField path="def_path" type="string (regex)">
+  Match definitions whose fully-qualified path matches this regular expression.
+
+  ```toml
+  { def_path = '<&.* as .*Automaton>::\w+' }
+  ```
+</ParamField>
+
+Predicates can also be composed with `not`, `any`, and `all`:
+
+```toml
+{ not  = { crate = { name = "std" } } }
+{ any  = [{ crate = { name = "std" } }, { crate = { name = "core" } }] }
+{ all  = [{ crate = { is_external = true } }, { def_path = ".*::debug.*" }] }
+```
+
+### Worked examples
+
+<Accordion title="Exclude a crate from all instrumentation (dyn_def)">
+
+  ```toml
+  # Skip all monomorphised definitions from the `regex` crate.
+  [[instr_rules.exclude]]
+  entity = "dyn_def"
+  all = [
+      { crate = { name = "regex" } },
+  ]
+  ```
+
+</Accordion>
+
+<Accordion title="Exclude a specific set of trait methods by path pattern (dyn_def)">
+
+  ```toml
+  # The aho-corasick recursive automaton methods cause stack overflows
+  # under concolic execution.
+  [[instr_rules.exclude]]
+  entity = "dyn_def"
+  all = [
+      { crate = { name = "aho_corasick" } },
+      { def_path = '<&.* as .*Automaton>::\w+' },
+  ]
+  ```
+
+</Accordion>
+
+<Accordion title="Exclude place-address tracking for a crate (place_info)">
+
+  ```toml
+  [[instr_rules.exclude]]
+  entity = "place_info"
+  kind   = "address"
+  all = [
+      { crate = { name = "my_allocator" } },
+  ]
+  ```
+
+</Accordion>
+
+<Accordion title="Exclude move and copy operand instrumentation">
+
+  ```toml
+  [[instr_rules.exclude]]
+  entity = "operand_kind"
+  kind   = { any = ["move", "copy"] }
+  all = []
+  ```
+
+</Accordion>
+
+<Accordion title="Exclude constant instrumentation for integer and bool types">
+
+  ```toml
+  [[instr_rules.exclude]]
+  entity = "const_type"
+  ty     = { any = ["int", "bool"] }
+  all = []
+  ```
+
+</Accordion>
+
+<Accordion title="Exclude switch-data instrumentation from all external crates">
+
+  ```toml
+  [[instr_rules.exclude]]
+  entity = "switch"
+  kind   = { any = ["data"] }
+  all = [
+      { crate = { is_external = true } },
+  ]
+  ```
+
+</Accordion>
+
+---
+
+## `[passes]` — compiler pass toggles
+
+Each compiler pass can be individually enabled or disabled. Most users never need to touch these; they are useful when you want to run only a subset of passes for performance profiling or debugging.
+
+Every pass shares the same `enabled` boolean:
+
+```toml
+[passes.<pass_name>]
+enabled = false
+```
+
+### Available passes
+
+<ParamField path="passes.instrumentation.enabled" type="boolean" default="true">
+  The main symbolic instrumentation pass. Disabling this produces a binary that compiles with leafc but performs no symbolic analysis at runtime.
+</ParamField>
+
+<ParamField path="passes.internalization.enabled" type="boolean" default="true">
+  In `codegen_all_mir` mode, internalizes (hides from the linker) the monomorphised items in dependency crates so they do not conflict with the fully-instrumented versions. Leave enabled unless you are diagnosing linker errors.
+</ParamField>
+
+<ParamField path="passes.internalization.rules.exclude" type="array of strings">
+  Symbol names that the internalization pass must **not** hide. Add any symbol that must remain visible to an external tool (for example, a libFuzzer entry point):
+
+  ```toml
+  [passes.internalization.rules]
+  exclude = ["LLVMFuzzerInitialize", "LLVMFuzzerTestOneInput"]
+  ```
+</ParamField>
+
+<ParamField path="passes.md_info.enabled" type="boolean" default="true">
+  Exports metadata about the instrumented program (function signatures, type information). Disable if you do not need this data and want faster compilation:
+
+  ```toml
+  [passes.md_info]
+  enabled = false
+  ```
+</ParamField>
+
+<ParamField path="passes.type_export.enabled" type="boolean" default="true">
+  Exports type layout information alongside the compiled binary.
+</ParamField>
+
+<ParamField path="passes.program_map.enabled" type="boolean" default="true">
+  Exports a map of the program's MIR structure, used by offline analysis tools.
+</ParamField>
+
+<ParamField path="passes.program_dep.enabled" type="boolean" default="true">
+  Exports the program dependence graph.
+</ParamField>
+
+---
+
+## Providing configuration inline
+
+Like the runtime, leafc accepts its configuration as an environment variable so you can override settings without modifying the file:
+
+```bash
+export LEAFC_CONFIG_STR='codegen_all_mir = false'
+export LEAFC_CONFIG_STR_FMT="toml"
+
+cargo build
+```
+
+`LEAFC_CONFIG_STR_FMT` accepts: `toml`, `json`, `json5`, `yaml`, `ron`, `ini`.
+
+The inline config is merged **on top of** any `leafc_config.toml` found on disk, so individual keys override without replacing the whole file.
+
+<Tip>
+  In a CI matrix where different jobs analyse different feature sets, use `LEAFC_CONFIG_STR` to inject per-job exclusion rules while keeping the shared `leafc_config.toml` in the repository.
+</Tip>

@@ -1,0 +1,160 @@
+---
+title: "Installing Leaf: leafc, Toolchain, and Runtime Backends"
+sidebarTitle: "Installation"
+description: "Set up the Leaf toolchain from scratch: install leafc, configure the nightly Rust components, build runtime backends, and verify your environment is ready."
+---
+
+This guide covers everything you need to go from a fresh machine to a fully configured Leaf environment. By the end, you will have `leafc` on your `PATH`, at least one runtime backend compiled, and the shared library linked so that instrumented binaries can load it at startup.
+
+## System requirements
+
+Leaf requires the following tools before you begin. Install each one for your operating system using its standard method.
+
+| Requirement | Notes |
+|-------------|-------|
+| **rustup** | Required to install and manage the nightly Rust toolchain. |
+| **Rust nightly toolchain** (`nightly-2026-07-01`) | Cargo installs this automatically from `rust-toolchain.toml` — see below. |
+| **Python** | Used by helper scripts in the repository (e.g., the toolchain builder). |
+| **C toolchain and linker** | `gcc` or `clang` with `ld` (or `lld`). Required to link the instrumented binary and the shared runtime library. |
+
+### Rust toolchain components
+
+Leaf requires a specific nightly toolchain pin plus several additional components. The `rust-toolchain.toml` at the repository root declares all of this:
+
+```toml
+[toolchain]
+channel = "nightly-2026-07-01"
+components = ["rust-src", "rustc-dev", "llvm-tools", "rustfmt", "clippy"]
+```
+
+When you run any `cargo` command inside the Leaf workspace, `rustup` reads this file and automatically downloads and activates the correct toolchain and components. You do not need to run `rustup override set` manually.
+
+<Note>
+  `rustc-dev` ships the compiler's internal library crates that `leafc` links against. Without it, the `leafc` build will fail. `rust-src` is needed to recompile the standard library with instrumentation when required.
+</Note>
+
+## Step 1 — Clone the repository
+
+```bash
+git clone https://github.com/sfu-rsl/leaf.git
+cd leaf
+```
+
+All subsequent commands in this guide assume your working directory is the repository root.
+
+## Step 2 — Install leafc
+
+Build and install the `leafc` compiler wrapper with Cargo:
+
+```bash
+cargo install --path ./compiler
+```
+
+Cargo places the binary at `~/.cargo/bin/leafc`. Confirm it is on your `PATH`:
+
+```bash
+leafc --version
+```
+
+<Tip>
+  If `leafc` is not found after installation, ensure `~/.cargo/bin` is in your `PATH`. Add `export PATH="$HOME/.cargo/bin:$PATH"` to your shell profile and reload it.
+</Tip>
+
+## Step 3 — Build a runtime backend
+
+Leaf ships with several backend crates. Each compiles to a shared library (`libleafrt.so` on Linux) that the instrumented binary loads at startup. Build whichever backend you need:
+
+<CodeGroup>
+  ```bash Symbolic execution
+  cargo build -p runtime_symex
+  ```
+
+  ```bash Control-flow tracer
+  cargo build -p runtime_cf_tracer
+  ```
+
+  ```bash No-op (compile testing only)
+  cargo build -p runtime_noop
+  ```
+</CodeGroup>
+
+| Backend | Crate name | Purpose |
+|---------|-----------|---------|
+| Symbolic execution | `runtime_symex` | Tracks symbolic values, collects path constraints, and uses Z3 to find diverging inputs. |
+| Control-flow tracer | `runtime_cf_tracer` | Records the sequence of basic blocks the program visits; useful for coverage analysis. |
+| No-op | `runtime_noop` | Accepts all callbacks and discards them immediately. Use this to verify instrumented compilation succeeds without running a full analysis. |
+
+By default, backends are compiled in debug mode and placed under `target/debug/`. Add `--release` for an optimised build:
+
+```bash
+cargo build -p runtime_symex --release
+# output: target/release/libleafrt*.so
+```
+
+## Step 4 — Set up the shared library
+
+The instrumented binary resolves `libleafrt.so` through `LD_LIBRARY_PATH` at startup. Create the expected directory, symlink the compiled library into it, and export the path.
+
+The commands below use the `runtime_symex` backend as an example. Substitute the backend name if you built a different one.
+
+```bash
+mkdir -p target/debug/runtime_symex
+ln -sf "$(find target/debug -maxdepth 1 -name 'libleafrt*.so' | head -n 1)" \
+    target/debug/runtime_symex/libleafrt.so
+export LD_LIBRARY_PATH="$PWD/target/debug/runtime_symex:$LD_LIBRARY_PATH"
+```
+
+<Warning>
+  `LD_LIBRARY_PATH` is session-scoped. If you open a new terminal, re-export it before running an instrumented binary, or add it to your shell profile. You must also repeat the symlink step whenever you rebuild the backend, because the library file may be replaced.
+</Warning>
+
+For a release build, adjust the path accordingly:
+
+```bash
+mkdir -p target/release/runtime_symex
+ln -sf "$(find target/release -maxdepth 1 -name 'libleafrt*.so' | head -n 1)" \
+    target/release/runtime_symex/libleafrt.so
+export LD_LIBRARY_PATH="$PWD/target/release/runtime_symex:$LD_LIBRARY_PATH"
+```
+
+## Step 5 — Verify the full setup
+
+Compile the `hello_world` sample with `leafc` and run it to confirm every piece is wired together:
+
+```bash
+leafc samples/hello_world.rs
+export LEAF_LOG="info"
+./hello_world
+```
+
+You should see the runtime initialise, register a symbolic variable, emit a path constraint, and print a Z3 solution. If the binary exits cleanly and produces output in the `output/` directory, your installation is working correctly.
+
+See the [Quickstart guide](/quickstart) for a detailed walkthrough of what the output means.
+
+## Devcontainer option
+
+If you use VS Code, the repository includes a `.devcontainer/Dockerfile` that pre-installs the system dependencies (including LLVM). Open the repository in VS Code, accept the prompt to reopen in a container, and the devcontainer will build an environment with everything ready.
+
+<Note>
+  The devcontainer is based on the official Debian devcontainers base image and installs `libssl-dev`, `pkg-config`, and LLVM. You still need to run `cargo install --path ./compiler` and build a backend after the container starts, because those steps produce user-specific binaries that are not baked into the image.
+</Note>
+
+## Summary
+
+<Steps>
+  <Step title="Clone the repo">
+    `git clone https://github.com/sfu-rsl/leaf.git && cd leaf`
+  </Step>
+  <Step title="Install leafc">
+    `cargo install --path ./compiler` — then confirm with `leafc --version`.
+  </Step>
+  <Step title="Build a backend">
+    `cargo build -p runtime_symex` (or another backend crate).
+  </Step>
+  <Step title="Link the shared library">
+    Create the directory, symlink `libleafrt.so`, and export `LD_LIBRARY_PATH`.
+  </Step>
+  <Step title="Verify">
+    Compile `samples/hello_world.rs` with `leafc` and run it with `LEAF_LOG=info`.
+  </Step>
+</Steps>
